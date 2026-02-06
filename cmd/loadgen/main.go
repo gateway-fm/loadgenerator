@@ -127,6 +127,7 @@ type LoadGenerator struct {
 	recentFails       int64 // atomic - failures in current window
 	recentRevocations int64 // atomic - preconf revocations in current window
 	circuitOpen       int32 // atomic - 1 if circuit breaker is open
+	preCircuitRate    int64 // atomic - rate before circuit opened (ceiling for AIMD recovery)
 
 	// Backpressure monitoring
 	builderPressure    float64 // last known block builder pressure (0.0-1.0)
@@ -1120,6 +1121,7 @@ func (lg *LoadGenerator) Reset() {
 	atomic.StoreInt64(&lg.recentFails, 0)
 	atomic.StoreInt64(&lg.recentRevocations, 0)
 	atomic.StoreInt32(&lg.circuitOpen, 0)
+	atomic.StoreInt64(&lg.preCircuitRate, 0)
 	atomic.StoreInt32(&lg.nonceResyncNeeded, 0)
 
 	// Reset backpressure monitoring
@@ -1603,13 +1605,10 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 	}
 
 	for {
-		// Wait for rate limiter permit FIRST - this replaces all sleep-based pacing.
-		// The token bucket ensures smooth, evenly-distributed permit issuance across
-		// all workers, eliminating synchronized bursts.
-		if err := lg.rateLimiter.Wait(lg.ctx); err != nil {
-			return // context cancelled
+		// Check context/stop FIRST to prevent busy-looping when shutting down
+		if lg.ctx.Err() != nil {
+			return
 		}
-
 		if lg.shouldStop() {
 			return
 		}
@@ -1632,7 +1631,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			if err != nil {
 				lg.logger.Error("failed to get tx builder for type", "type", txType, "error", err)
 				n.Rollback()
-				continue // No sleep needed - limiter already paced us
+				continue
 			}
 		} else {
 			// Standard mode: fixed tx type and tip
@@ -1655,7 +1654,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		if err != nil {
 			lg.logger.Error("failed to build tx", "error", err)
 			n.Rollback()
-			continue // No sleep needed - limiter already paced us
+			continue
 		}
 
 		// Sign transaction
@@ -1663,7 +1662,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		if err != nil {
 			lg.logger.Error("failed to sign tx", "error", err)
 			n.Rollback()
-			continue // No sleep needed - limiter already paced us
+			continue
 		}
 
 		// Encode transaction
@@ -1671,7 +1670,15 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		if err != nil {
 			lg.logger.Error("failed to encode tx", "error", err)
 			n.Rollback()
-			continue // No sleep needed - limiter already paced us
+			continue
+		}
+
+		// Wait for rate limiter permit AFTER build+sign+encode succeeds.
+		// This prevents build failures (e.g. "Uniswap V3 contracts not deployed")
+		// from wasting rate tokens and creating artificial backpressure.
+		if err := lg.rateLimiter.Wait(lg.ctx); err != nil {
+			n.Rollback()
+			return // context cancelled
 		}
 
 		// Record metrics for realistic/adaptive-realistic mode
@@ -1816,6 +1823,7 @@ func (lg *LoadGenerator) adaptiveController() {
 	// Circuit breaker thresholds
 	const (
 		minSamplesForCircuit    = int64(100) // Need at least 100 sends to evaluate
+		minSamplesForRecovery   = int64(20)  // Lower threshold when circuit is open (at low rates)
 		failureRateThreshold    = 0.30       // Open circuit if >30% send failures
 		revocationRateThreshold = 0.10       // Open circuit if >10% revocations (lower - revocations are worse)
 		recoveryRateThreshold   = 0.05       // Close circuit if <5% combined failures
@@ -1857,18 +1865,26 @@ func (lg *LoadGenerator) adaptiveController() {
 			pressure := lg.builderPressure
 			lg.builderPressureMu.RUnlock()
 
-			// Evaluate circuit breaker
-			if sends >= minSamplesForCircuit {
+			// Evaluate circuit breaker (lower sample threshold when circuit is open for faster recovery)
+			minSamples := minSamplesForCircuit
+			if circuitOpen {
+				minSamples = minSamplesForRecovery
+			}
+			if sends >= minSamples {
 				failureRate := float64(fails) / float64(sends)
 				revocationRate := float64(revocations) / float64(sends)
 				combinedFailureRate := failureRate + revocationRate
 
 				// Open circuit on high failure rate OR high revocation rate
 				if !circuitOpen && (failureRate > failureRateThreshold || revocationRate > revocationRateThreshold) {
-					// Open circuit - emergency stop
+					// Open circuit - gradual backoff (halve rate, floor 50)
 					atomic.StoreInt32(&lg.circuitOpen, 1)
 					atomic.StoreInt32(&lg.nonceResyncNeeded, 1) // Flag for nonce resync
-					newRate := int64(10)                        // Minimum rate
+					atomic.StoreInt64(&lg.preCircuitRate, currentRate)
+					newRate := currentRate / 2
+					if newRate < 50 {
+						newRate = 50
+					}
 					atomic.StoreInt64(&lg.currentRate, newRate)
 					lg.rateLimiter.SetRate(float64(newRate))
 					maxPat.SetCurrentRate(int(newRate))
@@ -1878,6 +1894,7 @@ func (lg *LoadGenerator) adaptiveController() {
 						"sends", sends,
 						"fails", fails,
 						"revocations", revocations,
+						"oldRate", currentRate,
 						"newRate", newRate)
 					// Trigger async nonce resync
 					go lg.resyncAllNonces()
@@ -1908,8 +1925,22 @@ func (lg *LoadGenerator) adaptiveController() {
 				continue
 			}
 
-			// If circuit is open, stay at minimum rate
+			// If circuit is open, probe-based recovery (AIMD: increase 50% per tick)
+			// If failures are still high, circuit re-trips and rate halves again.
+			// This creates natural oscillation toward equilibrium instead of permanent death.
 			if circuitOpen {
+				newRate := currentRate + (currentRate / 2)
+				ceiling := atomic.LoadInt64(&lg.preCircuitRate)
+				if ceiling > 0 && newRate > ceiling {
+					newRate = ceiling
+				}
+				atomic.StoreInt64(&lg.currentRate, newRate)
+				lg.rateLimiter.SetRate(float64(newRate))
+				maxPat.SetCurrentRate(int(newRate))
+				lg.logger.Info("circuit open - probing recovery (AIMD)",
+					"oldRate", currentRate,
+					"newRate", newRate,
+					"ceiling", ceiling)
 				continue
 			}
 
