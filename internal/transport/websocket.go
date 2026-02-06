@@ -141,12 +141,15 @@ func (ws *WebSocketServer) broadcastLoop() {
 		case <-ws.done:
 			return
 		case <-ticker.C:
-			metrics := ws.api.GetMetrics()
+			// Always broadcast to all connected clients regardless of test state.
+			// This allows the dashboard to maintain a persistent connection and
+			// detect new tests started via API without polling.
+			ws.clientsMu.RLock()
+			hasClients := len(ws.clients) > 0
+			ws.clientsMu.RUnlock()
 
-			// Broadcast if test is active (initializing/running/verifying/error/completed) or was recently active
-			if metrics.Status == types.StatusInitializing || metrics.Status == types.StatusRunning ||
-				metrics.Status == types.StatusVerifying || metrics.Status == types.StatusError ||
-				metrics.Status == types.StatusCompleted || metrics.TxSent > 0 {
+			if hasClients {
+				metrics := ws.api.GetMetrics()
 				ws.broadcastMetrics(metrics)
 			}
 		}
