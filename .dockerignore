@@ -1,0 +1,28 @@
+# Compiled binaries
+load-generator
+*.exe
+*.test
+
+# Database files (development only)
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Test files (not needed in production)
+*_test.go
+*_bench_test.go
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md

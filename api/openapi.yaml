@@ -1,0 +1,1021 @@
+openapi: 3.1.0
+info:
+  title: Load Generator API
+  description: |
+    REST API for the sequencer PoC load generator service.
+
+    Provides endpoints for controlling load tests, viewing test history,
+    and monitoring real-time metrics via WebSocket.
+
+    ## API Versioning
+
+    All API endpoints are available under the `/v1/` prefix. Legacy unversioned
+    endpoints (e.g., `/status`) are maintained for backwards compatibility but
+    new integrations should use the versioned endpoints (e.g., `/v1/status`).
+
+    Health endpoints (`/health`, `/ready`) and metrics (`/metrics`) are unversioned
+    as they follow Kubernetes/Prometheus standard paths.
+  version: 1.0.0
+  contact:
+    name: Gateway
+servers:
+  - url: http://localhost:13001/v1
+    description: Local development server (versioned API)
+  - url: http://localhost:13001
+    description: Local development server (legacy, unversioned)
+
+tags:
+  - name: Test Control
+    description: Start, stop, and reset load tests
+  - name: Test History
+    description: View and manage past test runs
+  - name: Health
+    description: Health and readiness probes
+  - name: Metrics
+    description: Prometheus metrics and real-time streaming
+
+paths:
+  /status:
+    get:
+      tags: [Test Control]
+      summary: Get current test metrics
+      description: Returns real-time metrics for the currently running or most recent test.
+      operationId: getStatus
+      responses:
+        '200':
+          description: Current test metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestMetrics'
+
+  /start:
+    post:
+      tags: [Test Control]
+      summary: Start a new load test
+      description: |
+        Starts a new load test with the specified configuration.
+        Only one test can run at a time.
+      operationId: startTest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartTestRequest'
+      responses:
+        '200':
+          description: Test started successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: started
+        '400':
+          description: Invalid request (validation error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to start test
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /stop:
+    post:
+      tags: [Test Control]
+      summary: Stop the current test
+      description: Stops the currently running load test gracefully.
+      operationId: stopTest
+      responses:
+        '200':
+          description: Test stopped successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: stopped
+
+  /reset:
+    post:
+      tags: [Test Control]
+      summary: Reset the load generator
+      description: Resets the load generator state, clearing current metrics.
+      operationId: resetGenerator
+      responses:
+        '200':
+          description: Generator reset successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: reset
+
+  /recycle:
+    post:
+      tags: [Test Control]
+      summary: Recycle funds from dynamic accounts
+      description: |
+        Transfers remaining funds from dynamically created test accounts
+        back to the faucet accounts.
+      operationId: recycleFunds
+      responses:
+        '200':
+          description: Funds recycled successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [success, partial]
+                  recycled:
+                    type: integer
+                    description: Number of accounts recycled
+                  error:
+                    type: string
+                    description: Error message if partial success
+
+  /history:
+    get:
+      tags: [Test History]
+      summary: Get test history
+      description: Returns a paginated list of past test runs.
+      operationId: getHistory
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of results (1-100)
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          description: Number of results to skip
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Paginated test runs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedTestRuns'
+        '500':
+          description: Failed to retrieve history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /history/{id}:
+    get:
+      tags: [Test History]
+      summary: Get test run details
+      description: Returns detailed information about a specific test run, including time series data.
+      operationId: getTestRunDetail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Test run ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Test run details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestRunDetail'
+        '404':
+          description: Test run not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to retrieve test run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      tags: [Test History]
+      summary: Update test run metadata
+      description: Updates the custom name or favorite status of a test run.
+      operationId: updateTestRunMetadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Test run ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestRunMetadataUpdate'
+      responses:
+        '200':
+          description: Updated test run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestRun'
+        '404':
+          description: Test run not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to update test run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Test History]
+      summary: Delete a test run
+      description: Permanently deletes a test run and all associated data.
+      operationId: deleteTestRun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Test run ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Test run deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    example: true
+        '500':
+          description: Failed to delete test run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /history/{id}/transactions:
+    get:
+      tags: [Test History]
+      summary: Get test run transactions
+      description: Returns a paginated list of transaction logs for a specific test run.
+      operationId: getTestRunTransactions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Test run ID
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of results (1-1000)
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: offset
+          in: query
+          description: Number of results to skip
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Paginated transaction logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedTxLogs'
+        '500':
+          description: Failed to retrieve transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: Returns basic health status. Always returns 200 if the service is running.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  timestamp:
+                    type: string
+                    format: date-time
+                  uptime_seconds:
+                    type: number
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: |
+        Returns readiness status including dependency checks.
+        Returns 503 if any dependency is unavailable.
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Service is not ready (dependencies unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+
+  /metrics:
+    get:
+      tags: [Metrics]
+      summary: Prometheus metrics
+      description: Returns Prometheus-formatted metrics for scraping.
+      operationId: getPrometheusMetrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /ws:
+    get:
+      tags: [Metrics]
+      summary: WebSocket for real-time metrics
+      description: |
+        WebSocket endpoint for real-time metrics streaming.
+        Sends TestMetrics JSON every 200ms while a test is running.
+
+        Connect using: `ws://localhost:13001/ws`
+      operationId: websocketMetrics
+      responses:
+        '101':
+          description: WebSocket upgrade successful
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+      required: [error]
+
+    LoadPattern:
+      type: string
+      enum: [constant, ramp, spike, adaptive, realistic]
+      description: Type of load pattern
+
+    TransactionType:
+      type: string
+      enum: [eth-transfer, erc20-transfer, erc20-approve, uniswap-swap, storage-write, heavy-compute]
+      description: Type of transaction to generate
+
+    TestStatus:
+      type: string
+      enum: [idle, initializing, running, verifying, completed, error]
+      description: Current test state
+
+    InitPhase:
+      type: string
+      enum: ['', generating_accounts, funding_accounts, waiting_for_funding, initializing_nonces, deploying_contracts, starting_workers]
+      description: Current initialization phase
+
+    TipDistribution:
+      type: string
+      enum: [exponential, power-law, uniform]
+      description: Tip distribution strategy for realistic tests
+
+    StartTestRequest:
+      type: object
+      required: [pattern, durationSec]
+      properties:
+        pattern:
+          $ref: '#/components/schemas/LoadPattern'
+        durationSec:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Test duration in seconds
+        numAccounts:
+          type: integer
+          minimum: 0
+          maximum: 100000
+          description: Number of test accounts to use
+        transactionType:
+          $ref: '#/components/schemas/TransactionType'
+        # Constant pattern
+        constantRate:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          description: TPS for constant pattern
+        # Ramp pattern
+        rampStart:
+          type: integer
+          minimum: 0
+          description: Starting TPS for ramp pattern
+        rampEnd:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          description: Ending TPS for ramp pattern
+        rampSteps:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Number of steps for ramp pattern
+        # Spike pattern
+        baselineRate:
+          type: integer
+          minimum: 0
+          description: Baseline TPS for spike pattern
+        spikeRate:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          description: Spike TPS for spike pattern
+        spikeDuration:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Spike duration in seconds
+        spikeInterval:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Time between spikes in seconds
+        # Adaptive pattern
+        adaptiveInitialRate:
+          type: integer
+          minimum: 0
+          maximum: 100000
+          description: Initial TPS for adaptive pattern
+        adaptiveTargetPending:
+          type: integer
+          description: Target pending TX count for adaptive pattern
+        adaptiveRateStep:
+          type: integer
+          description: Rate adjustment step for adaptive pattern
+        # Realistic pattern
+        realisticConfig:
+          $ref: '#/components/schemas/RealisticTestConfig'
+
+    RealisticTestConfig:
+      type: object
+      required: [numAccounts, targetTps]
+      properties:
+        numAccounts:
+          type: integer
+          minimum: 1
+          maximum: 100000
+        targetTps:
+          type: integer
+          minimum: 1
+          maximum: 100000
+        minTipGwei:
+          type: number
+          minimum: 0
+        maxTipGwei:
+          type: number
+          minimum: 0
+        tipDistribution:
+          $ref: '#/components/schemas/TipDistribution'
+        txTypeRatios:
+          $ref: '#/components/schemas/TxTypeRatio'
+
+    TxTypeRatio:
+      type: object
+      description: Percentage for each transaction type (must sum to 100)
+      properties:
+        ethTransfer:
+          type: integer
+        erc20Transfer:
+          type: integer
+        erc20Approve:
+          type: integer
+        uniswapSwap:
+          type: integer
+        storageWrite:
+          type: integer
+        heavyCompute:
+          type: integer
+
+    LatencyStats:
+      type: object
+      properties:
+        count:
+          type: integer
+        min:
+          type: number
+          description: Minimum latency in ms
+        max:
+          type: number
+          description: Maximum latency in ms
+        avg:
+          type: number
+          description: Average latency in ms
+        p50:
+          type: number
+        p75:
+          type: number
+        p90:
+          type: number
+        p95:
+          type: number
+        p99:
+          type: number
+        buckets:
+          type: array
+          items:
+            $ref: '#/components/schemas/LatencyBucket'
+
+    LatencyBucket:
+      type: object
+      properties:
+        label:
+          type: string
+        count:
+          type: integer
+
+    TxFlowStats:
+      type: object
+      properties:
+        directConfirmed:
+          type: integer
+        pendingConfirmed:
+          type: integer
+        preconfConfirmed:
+          type: integer
+        droppedRequeued:
+          type: integer
+        revokedFlow:
+          type: integer
+        failedFlow:
+          type: integer
+        totalTracked:
+          type: integer
+        avgStageCount:
+          type: number
+
+    TestMetrics:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/TestStatus'
+        txSent:
+          type: integer
+        txConfirmed:
+          type: integer
+        txFailed:
+          type: integer
+        txDiscarded:
+          type: integer
+        currentTps:
+          type: number
+        averageTps:
+          type: number
+        elapsedMs:
+          type: integer
+        durationMs:
+          type: integer
+        targetTps:
+          type: integer
+        pattern:
+          $ref: '#/components/schemas/LoadPattern'
+        transactionType:
+          $ref: '#/components/schemas/TransactionType'
+        error:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        peakTps:
+          type: integer
+        initPhase:
+          $ref: '#/components/schemas/InitPhase'
+        initProgress:
+          type: string
+        accountsTotal:
+          type: integer
+        accountsGenerated:
+          type: integer
+        fundingTxsSent:
+          type: integer
+        fundingTxsTotal:
+          type: integer
+        contractsDeployed:
+          type: integer
+        contractsTotal:
+          type: integer
+        txPending:
+          type: integer
+        txPreconfirmed:
+          type: integer
+        txRevoked:
+          type: integer
+        txDropped:
+          type: integer
+        txRequeued:
+          type: integer
+        flowStats:
+          $ref: '#/components/schemas/TxFlowStats'
+        latency:
+          $ref: '#/components/schemas/LatencyStats'
+        preconfLatency:
+          $ref: '#/components/schemas/LatencyStats'
+        pendingLatency:
+          $ref: '#/components/schemas/LatencyStats'
+        tipHistogram:
+          type: array
+          items:
+            $ref: '#/components/schemas/TipHistogramBucket'
+        txTypeMetrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/TxTypeMetrics'
+        accountsActive:
+          type: integer
+        accountsFunded:
+          type: integer
+        latestBaseFeeGwei:
+          type: number
+        latestGasPriceGwei:
+          type: number
+        latestGasUsed:
+          type: integer
+        totalGasUsed:
+          type: integer
+        blockCount:
+          type: integer
+        peakMgasPerSec:
+          type: number
+        avgMgasPerSec:
+          type: number
+        avgFillRate:
+          type: number
+        currentMgasPerSec:
+          type: number
+        currentFillRate:
+          type: number
+
+    TipHistogramBucket:
+      type: object
+      properties:
+        minGwei:
+          type: number
+        maxGwei:
+          type: number
+        count:
+          type: integer
+
+    TxTypeMetrics:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/TransactionType'
+        sent:
+          type: integer
+        confirmed:
+          type: integer
+        failed:
+          type: integer
+        avgTipGwei:
+          type: number
+
+    TestRun:
+      type: object
+      properties:
+        id:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        pattern:
+          $ref: '#/components/schemas/LoadPattern'
+        transactionType:
+          $ref: '#/components/schemas/TransactionType'
+        durationMs:
+          type: integer
+        txSent:
+          type: integer
+        txConfirmed:
+          type: integer
+        txFailed:
+          type: integer
+        txDiscarded:
+          type: integer
+        averageTps:
+          type: number
+        peakTps:
+          type: integer
+        latencyStats:
+          $ref: '#/components/schemas/LatencyStats'
+        preconfLatency:
+          $ref: '#/components/schemas/LatencyStats'
+        config:
+          $ref: '#/components/schemas/StartTestRequest'
+        status:
+          type: string
+          enum: [running, completed, error]
+        errorMessage:
+          type: string
+        txLoggingEnabled:
+          type: boolean
+        executionLayer:
+          type: string
+          enum: [reth, op-reth, gravity-reth, cdk-erigon]
+        blockCount:
+          type: integer
+        totalGasUsed:
+          type: integer
+        avgFillRate:
+          type: number
+        peakMgasPerSec:
+          type: number
+        avgMgasPerSec:
+          type: number
+        customName:
+          type: string
+        isFavorite:
+          type: boolean
+        onChainFirstBlock:
+          type: integer
+        onChainLastBlock:
+          type: integer
+        onChainTxCount:
+          type: integer
+        onChainGasUsed:
+          type: integer
+        onChainMgasPerSec:
+          type: number
+        onChainTps:
+          type: number
+        onChainDurationSecs:
+          type: number
+        environment:
+          $ref: '#/components/schemas/EnvironmentSnapshot'
+        verification:
+          $ref: '#/components/schemas/VerificationResult'
+
+    EnvironmentSnapshot:
+      type: object
+      properties:
+        builderBlockTimeMs:
+          type: integer
+        builderGasLimit:
+          type: integer
+        builderMaxTxsPerBlock:
+          type: integer
+        builderTxOrdering:
+          type: string
+        builderEnablePreconfs:
+          type: boolean
+        builderSkipEmptyBlocks:
+          type: boolean
+        builderIncludeDepositTx:
+          type: boolean
+        loadGenGasTipCapGwei:
+          type: number
+        loadGenGasFeeCapGwei:
+          type: number
+        loadGenExecutionLayer:
+          type: string
+
+    VerificationResult:
+      type: object
+      properties:
+        metricsMatch:
+          type: boolean
+        txCountDelta:
+          type: integer
+        gasUsedDelta:
+          type: integer
+        tipOrdering:
+          $ref: '#/components/schemas/TipOrderingResult'
+        txReceipts:
+          $ref: '#/components/schemas/TxReceiptVerification'
+        allChecksPass:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+
+    TipOrderingResult:
+      type: object
+      properties:
+        verified:
+          type: boolean
+        totalBlocks:
+          type: integer
+        blocksSampled:
+          type: integer
+        correctlyOrdered:
+          type: integer
+        violationCount:
+          type: integer
+
+    TxReceiptVerification:
+      type: object
+      properties:
+        sampleSize:
+          type: integer
+        successCount:
+          type: integer
+        revertCount:
+          type: integer
+        avgGasUsed:
+          type: integer
+        minGasUsed:
+          type: integer
+        maxGasUsed:
+          type: integer
+        totalGasVerified:
+          type: integer
+
+    TimeSeriesPoint:
+      type: object
+      properties:
+        timestampMs:
+          type: integer
+        txSent:
+          type: integer
+        txConfirmed:
+          type: integer
+        txFailed:
+          type: integer
+        currentTps:
+          type: number
+        targetTps:
+          type: integer
+        pendingCount:
+          type: integer
+        gasUsed:
+          type: integer
+        gasLimit:
+          type: integer
+        blockCount:
+          type: integer
+        mgasPerSec:
+          type: number
+        fillRate:
+          type: number
+        avgBlockTimeMs:
+          type: number
+        baseFeeGwei:
+          type: number
+        gasPriceGwei:
+          type: number
+
+    TxLogEntry:
+      type: object
+      properties:
+        txHash:
+          type: string
+        sentAtMs:
+          type: integer
+        confirmedAtMs:
+          type: integer
+        preconfAtMs:
+          type: integer
+        confirmLatencyMs:
+          type: integer
+        preconfLatencyMs:
+          type: integer
+        status:
+          type: string
+          enum: [pending, confirmed, failed]
+        errorReason:
+          type: string
+        fromAccount:
+          type: integer
+        nonce:
+          type: integer
+        gasTipGwei:
+          type: number
+
+    TestRunDetail:
+      type: object
+      properties:
+        run:
+          $ref: '#/components/schemas/TestRun'
+        timeSeries:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimeSeriesPoint'
+
+    TestRunMetadataUpdate:
+      type: object
+      properties:
+        customName:
+          type: string
+          description: Custom name for the test run
+        isFavorite:
+          type: boolean
+          description: Whether the test is favorited
+
+    PaginatedTestRuns:
+      type: object
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestRun'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    PaginatedTxLogs:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/TxLogEntry'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ReadinessCheck:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ok, degraded, failed]
+        latency_ms:
+          type: integer
+        error:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      properties:
+        ready:
+          type: boolean
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReadinessCheck'

@@ -1,0 +1,42 @@
+# Compiled binaries
+loadgen
+load-generator
+*.exe
+*.test
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Data directory
+data/
+
+# Environment files
+.env
+.env.local
+!.env.example
+
+# Test artifacts
+*.prof
+*.cpu
+*.mem
+coverage/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Claude Code
+.claude/
