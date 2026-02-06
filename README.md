@@ -549,6 +549,12 @@ func (cb *CircuitBreaker) onOpen() {
 | uniswap-swap | 250,000 | ~120 |
 | heavy-compute | 500,000 | ~60 |
 
+## MCP Server
+
+An [MCP](https://modelcontextprotocol.io/) server is included for AI-assisted interaction with a running load generator. It exposes 10 tools (status, start/stop tests, history, transaction logs, fund recycling) over stdio transport. Works with Claude Code and OpenCode out of the box via `.mcp.json` / `opencode.json`.
+
+See [docs/mcp.md](docs/mcp.md) for full tool reference and setup.
+
 ## Development
 
 ```bash
