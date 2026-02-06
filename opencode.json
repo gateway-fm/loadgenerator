@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "loadgenerator": {
+      "type": "local",
+      "command": ["go", "run", "./cmd/mcp"],
+      "environment": {
+        "LOADGEN_URL": "http://localhost:13001"
+      }
+    }
+  }
+}

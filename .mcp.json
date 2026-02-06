@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "loadgenerator": {
+      "command": "go",
+      "args": ["run", "./cmd/mcp"],
+      "env": {
+        "LOADGEN_URL": "http://localhost:13001"
+      }
+    }
+  }
+}
