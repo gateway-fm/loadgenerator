@@ -242,6 +242,35 @@ func (d *Deployer) waitForDeployment(ctx context.Context, name string, contractA
 	return common.Address{}, fmt.Errorf("timeout waiting for %s deployment", name)
 }
 
+// ValidateCachedContracts checks which cached contracts still have code on-chain.
+// Returns valid contracts (name→address) and a list of invalid names that need redeployment.
+func (d *Deployer) ValidateCachedContracts(ctx context.Context, cached map[string]string) (valid map[string]common.Address, invalid []string) {
+	valid = make(map[string]common.Address)
+	for name, addrHex := range cached {
+		addr := common.HexToAddress(addrHex)
+		exists, err := d.checkContractExists(ctx, addr)
+		if err != nil {
+			d.logger.Warn("Failed to validate cached contract",
+				slog.String("name", name),
+				slog.String("address", addrHex),
+				slog.String("error", err.Error()),
+			)
+			invalid = append(invalid, name)
+			continue
+		}
+		if !exists {
+			d.logger.Info("Cached contract no longer exists",
+				slog.String("name", name),
+				slog.String("address", addrHex),
+			)
+			invalid = append(invalid, name)
+			continue
+		}
+		valid[name] = addr
+	}
+	return valid, invalid
+}
+
 // Deploy deploys a single contract.
 func (d *Deployer) Deploy(ctx context.Context, deployer *account.Account, name string, bytecode []byte) (common.Address, error) {
 	nonce, err := d.client.GetNonce(ctx, deployer.Address.Hex())

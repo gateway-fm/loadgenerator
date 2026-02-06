@@ -243,6 +243,17 @@ func (b *UniswapV3SwapBuilder) GetContracts() *uniswapv3.DeployedContracts {
 	return b.contracts
 }
 
+// RestoreContracts restores previously deployed contracts from cache,
+// allowing warm starts without redeployment.
+func (b *UniswapV3SwapBuilder) RestoreContracts(contracts *uniswapv3.DeployedContracts) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.contracts = contracts
+	b.poolConfig = uniswapv3.DefaultPoolConfig(contracts.WETH9, contracts.USDC)
+	b.setupConfig = uniswapv3.DefaultAccountSetupConfig()
+	b.deployed = true
+}
+
 // IsDeployed returns whether contracts have been deployed.
 func (b *UniswapV3SwapBuilder) IsDeployed() bool {
 	b.mu.RLock()

@@ -144,6 +144,31 @@ func (s *SQLiteStorage) migrate() error {
 		return err
 	}
 
+	// Cache tables for cross-test account and contract reuse
+	cacheSchema := `
+	CREATE TABLE IF NOT EXISTS cached_accounts (
+		address TEXT NOT NULL,
+		private_key_hex TEXT NOT NULL,
+		chain_id INTEGER NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		uniswap_ready INTEGER DEFAULT 0,
+		PRIMARY KEY (address, chain_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cached_accounts_chain ON cached_accounts(chain_id);
+
+	CREATE TABLE IF NOT EXISTS cached_contracts (
+		name TEXT NOT NULL,
+		address TEXT NOT NULL,
+		chain_id INTEGER NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (name, chain_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cached_contracts_chain ON cached_contracts(chain_id);
+	`
+	if _, err := s.db.Exec(cacheSchema); err != nil {
+		return err
+	}
+
 	// Run migration to add new columns if they don't exist
 	// Uses a helper that checks if column exists before adding
 	migrations := []struct {
@@ -858,4 +883,157 @@ func nullString(v string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: v, Valid: true}
+}
+
+// --- CacheStorage implementation ---
+
+// SaveCachedAccounts bulk-inserts accounts using INSERT OR REPLACE in a single transaction.
+func (s *SQLiteStorage) SaveCachedAccounts(ctx context.Context, accounts []CachedAccount) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR REPLACE INTO cached_accounts (address, private_key_hex, chain_id, created_at, uniswap_ready)
+		VALUES (?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, a := range accounts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		uniswapReady := 0
+		if a.UniswapReady {
+			uniswapReady = 1
+		}
+		_, err := stmt.ExecContext(ctx, a.Address, a.PrivateKeyHex, a.ChainID, a.CreatedAt, uniswapReady)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// LoadCachedAccounts returns all cached accounts for a chain, ordered by insertion.
+func (s *SQLiteStorage) LoadCachedAccounts(ctx context.Context, chainID int64) ([]CachedAccount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT address, private_key_hex, chain_id, created_at, uniswap_ready
+		FROM cached_accounts
+		WHERE chain_id = ?
+		ORDER BY rowid
+	`, chainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []CachedAccount
+	for rows.Next() {
+		var a CachedAccount
+		var uniswapReady int
+		if err := rows.Scan(&a.Address, &a.PrivateKeyHex, &a.ChainID, &a.CreatedAt, &uniswapReady); err != nil {
+			return nil, err
+		}
+		a.UniswapReady = uniswapReady == 1
+		accounts = append(accounts, a)
+	}
+	return accounts, rows.Err()
+}
+
+// DeleteCachedAccounts removes all cached accounts for a chain.
+func (s *SQLiteStorage) DeleteCachedAccounts(ctx context.Context, chainID int64) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM cached_accounts WHERE chain_id = ?", chainID)
+	return err
+}
+
+// MarkAccountsUniswapReady sets uniswap_ready=1 for the given addresses on a chain.
+func (s *SQLiteStorage) MarkAccountsUniswapReady(ctx context.Context, chainID int64, addresses []string) error {
+	if len(addresses) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Batch update using parameterized IN clause
+	// SQLite has a variable limit, so batch in groups of 500
+	const batchSize = 500
+	for i := 0; i < len(addresses); i += batchSize {
+		end := i + batchSize
+		if end > len(addresses) {
+			end = len(addresses)
+		}
+		batch := addresses[i:end]
+
+		placeholders := make([]byte, 0, len(batch)*2)
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, chainID)
+		for j, addr := range batch {
+			if j > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args = append(args, addr)
+		}
+
+		query := "UPDATE cached_accounts SET uniswap_ready = 1 WHERE chain_id = ? AND address IN (" + string(placeholders) + ")"
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveCachedContract inserts or replaces a single cached contract.
+func (s *SQLiteStorage) SaveCachedContract(ctx context.Context, c CachedContract) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO cached_contracts (name, address, chain_id, created_at)
+		VALUES (?, ?, ?, ?)
+	`, c.Name, c.Address, c.ChainID, c.CreatedAt)
+	return err
+}
+
+// LoadCachedContracts returns all cached contracts for a chain.
+func (s *SQLiteStorage) LoadCachedContracts(ctx context.Context, chainID int64) ([]CachedContract, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, address, chain_id, created_at
+		FROM cached_contracts
+		WHERE chain_id = ?
+		ORDER BY rowid
+	`, chainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contracts []CachedContract
+	for rows.Next() {
+		var c CachedContract
+		if err := rows.Scan(&c.Name, &c.Address, &c.ChainID, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		contracts = append(contracts, c)
+	}
+	return contracts, rows.Err()
+}
+
+// DeleteCachedContracts removes all cached contracts for a chain.
+func (s *SQLiteStorage) DeleteCachedContracts(ctx context.Context, chainID int64) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM cached_contracts WHERE chain_id = ?", chainID)
+	return err
 }

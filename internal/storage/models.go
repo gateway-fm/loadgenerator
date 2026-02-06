@@ -212,6 +212,23 @@ type IncrementalVerificationSnapshot struct {
 	RevertedTxs      []TxReceiptSample `json:"revertedTxs,omitempty"` // Reverted TXs in this snapshot (up to 10)
 }
 
+// CachedAccount represents a persisted dynamic test account for cross-test reuse.
+type CachedAccount struct {
+	Address       string    `json:"address"`
+	PrivateKeyHex string    `json:"privateKeyHex"`
+	ChainID       int64     `json:"chainId"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UniswapReady  bool      `json:"uniswapReady"`
+}
+
+// CachedContract represents a persisted deployed contract address.
+type CachedContract struct {
+	Name      string    `json:"name"`
+	Address   string    `json:"address"`
+	ChainID   int64     `json:"chainId"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // TestRunMetadataUpdate represents an update to test run metadata (name/favorite).
 type TestRunMetadataUpdate struct {
 	CustomName *string `json:"customName,omitempty"`

@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -595,6 +596,168 @@ func (m *Manager) fundAccount(
 	}
 
 	return fmt.Errorf("max retries exceeded for funding")
+}
+
+// AccountKeyPair holds an address and its hex-encoded private key for cache persistence.
+type AccountKeyPair struct {
+	Address       string
+	PrivateKeyHex string
+}
+
+// SetDynamicAccounts sets pre-loaded dynamic accounts from cache.
+func (m *Manager) SetDynamicAccounts(accounts []*Account) {
+	m.dynamicAccounts = accounts
+	atomic.StoreInt32(&m.accountsFunded, int32(len(accounts)))
+}
+
+// ValidateBalances checks balances of accounts in parallel and splits them into
+// funded (>= minBalance) and unfunded groups.
+func (m *Manager) ValidateBalances(ctx context.Context, client rpc.Client, accounts []*Account, minBalance *big.Int) (funded, unfunded []*Account) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+
+	type result struct {
+		idx    int
+		funded bool
+	}
+
+	results := make([]result, len(accounts))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 32) // Limit concurrent RPC calls
+
+	for i, acc := range accounts {
+		wg.Add(1)
+		go func(idx int, acc *Account) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			balance, err := client.GetBalance(ctx, acc.Address.Hex())
+			if err != nil {
+				m.logger.Debug("balance check failed",
+					slog.Int("idx", idx),
+					slog.String("err", err.Error()))
+				results[idx] = result{idx: idx, funded: false}
+				return
+			}
+			results[idx] = result{idx: idx, funded: balance.Cmp(minBalance) >= 0}
+		}(i, acc)
+	}
+	wg.Wait()
+
+	for i, r := range results {
+		if r.funded {
+			funded = append(funded, accounts[i])
+		} else {
+			unfunded = append(unfunded, accounts[i])
+		}
+	}
+	return funded, unfunded
+}
+
+// FundAccounts funds an arbitrary slice of accounts using faucets[1..9].
+// sendClient is used for sending transactions, syncClient for nonce confirmation.
+func (m *Manager) FundAccounts(ctx context.Context, sendClient, syncClient rpc.Client, accounts []*Account) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	fundAmount, _ := new(big.Int).SetString("1000000000000000000000", 10) // 1,000 ETH
+	signer := types.LatestSignerForChainID(m.chainID)
+
+	numFaucets := len(m.accounts) - 1 // accounts[1..9]
+	if numFaucets < 1 {
+		numFaucets = 1
+	}
+
+	m.logger.Info("Funding accounts subset",
+		slog.Int("count", len(accounts)),
+		slog.Int("faucets", numFaucets),
+	)
+
+	// Sync faucet nonces through builder
+	startingNonces := make([]uint64, numFaucets)
+	for i := 0; i < numFaucets; i++ {
+		faucet := m.accounts[i+1]
+		if err := faucet.Resync(ctx, sendClient); err != nil {
+			return fmt.Errorf("resync faucet %d from builder: %w", i+1, err)
+		}
+		startingNonces[i] = faucet.PeekNonce()
+	}
+
+	txsPerFaucet := make([]int, numFaucets)
+	for i := range accounts {
+		txsPerFaucet[i%numFaucets]++
+	}
+
+	var wg sync.WaitGroup
+	var fundedCount atomic.Int32
+	for faucetIdx := 0; faucetIdx < numFaucets; faucetIdx++ {
+		wg.Add(1)
+		go func(fIdx int) {
+			defer wg.Done()
+			faucet := m.accounts[fIdx+1]
+
+			for i := fIdx; i < len(accounts); i += numFaucets {
+				acc := accounts[i]
+				if err := m.fundAccountFast(ctx, sendClient, faucet, acc, signer, fundAmount); err != nil {
+					m.logger.Warn("Failed to fund account",
+						slog.Int("idx", i),
+						slog.Int("faucet", fIdx+1),
+						slog.String("err", err.Error()))
+					continue
+				}
+				fundedCount.Add(1)
+			}
+		}(faucetIdx)
+	}
+	wg.Wait()
+
+	m.logger.Info("Funding TXs sent, waiting for confirmation...",
+		slog.Int("sent", int(fundedCount.Load())))
+
+	// Wait for confirmations
+	confirmTimeout := 2 * time.Minute
+	var confirmWg sync.WaitGroup
+	confirmErrors := make(chan error, numFaucets)
+
+	for faucetIdx := 0; faucetIdx < numFaucets; faucetIdx++ {
+		confirmWg.Add(1)
+		go func(fIdx int) {
+			defer confirmWg.Done()
+			faucet := m.accounts[fIdx+1]
+			expectedNonce := startingNonces[fIdx] + uint64(txsPerFaucet[fIdx])
+
+			if err := m.waitForNonceConfirmation(ctx, syncClient, faucet, expectedNonce, confirmTimeout); err != nil {
+				select {
+				case confirmErrors <- fmt.Errorf("faucet %d: %w", fIdx+1, err):
+				default:
+				}
+			}
+		}(faucetIdx)
+	}
+	confirmWg.Wait()
+	close(confirmErrors)
+
+	if err := <-confirmErrors; err != nil {
+		m.logger.Warn("Some faucet confirmations failed", slog.String("firstErr", err.Error()))
+	}
+
+	m.logger.Info("Subset funding complete", slog.Int("funded", int(fundedCount.Load())))
+	return nil
+}
+
+// ExportDynamicAccountKeys returns address + hex private key pairs for all dynamic accounts.
+func (m *Manager) ExportDynamicAccountKeys() []AccountKeyPair {
+	pairs := make([]AccountKeyPair, len(m.dynamicAccounts))
+	for i, acc := range m.dynamicAccounts {
+		pairs[i] = AccountKeyPair{
+			Address:       acc.Address.Hex(),
+			PrivateKeyHex: hex.EncodeToString(crypto.FromECDSA(acc.PrivateKey)),
+		}
+	}
+	return pairs
 }
 
 // Reset clears dynamic accounts.

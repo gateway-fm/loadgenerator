@@ -33,6 +33,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/internal/transport"
 	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
+	"github.com/gateway-fm/loadgenerator/internal/uniswapv3"
 	"github.com/gateway-fm/loadgenerator/internal/verification"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
@@ -55,6 +56,7 @@ type LoadGenerator struct {
 	metricsCol    metrics.Collector
 	deployer      *contract.Deployer
 	storage       storage.Storage
+	cacheStorage  storage.CacheStorage
 
 	// Contract addresses
 	erc20Contract       common.Address
@@ -293,6 +295,11 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		testHistory:      make([]types.TestResult, 0),
 		sender:           snd,
 		logger:           logger,
+	}
+
+	// Wire cache storage if the store supports it
+	if cs, ok := store.(storage.CacheStorage); ok {
+		lg.cacheStorage = cs
 	}
 
 	return lg, nil
@@ -563,69 +570,70 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	accounts := lg.accountMgr.GetAccounts()
 	if numAccounts > len(accounts) {
 		dynamicCount := numAccounts - len(accounts)
+		chainID := lg.cfg.ChainID
 
-		// Phase: Generating accounts
-		lg.initPhase = types.InitPhaseGeneratingAccts
-		lg.initProgress = fmt.Sprintf("Generating %d accounts...", dynamicCount)
-		lg.logger.Info("generating dynamic accounts", "count", dynamicCount)
-
-		if err := lg.accountMgr.GenerateDynamicAccounts(dynamicCount); err != nil {
-			lg.setError(fmt.Sprintf("failed to generate accounts: %v", err))
-			return
-		}
-		lg.initAccountsGen = dynamicCount
-
-		// CRITICAL: Reset builder's nonce cache before funding to prevent stale cache
-		// causing "nonce ahead" rejections. The builder may have cached old nonces from
-		// previous test runs, which would cause all funding TXs to be rejected.
-		if err := lg.resetBuilderNonces(); err != nil {
-			lg.setError(fmt.Sprintf("failed to reset builder nonces: %v (cannot start test with stale cache)", err))
-			return
+		// Try warm start from cached accounts
+		warmStartOK := false
+		if lg.cacheStorage != nil {
+			warmStartOK = lg.tryWarmStartAccounts(dynamicCount, chainID)
 		}
 
-		// Phase: Funding accounts
-		lg.initPhase = types.InitPhaseFundingAccts
-		lg.initFundingTotal = dynamicCount
-		lg.initProgress = fmt.Sprintf("Funding %d accounts from faucet...", dynamicCount)
-		lg.logger.Info("funding dynamic accounts from faucet")
+		if !warmStartOK {
+			// Cold start: generate + fund from scratch
+			lg.initPhase = types.InitPhaseGeneratingAccts
+			lg.initProgress = fmt.Sprintf("Generating %d accounts...", dynamicCount)
+			lg.logger.Info("generating dynamic accounts", "count", dynamicCount)
 
-		fundCtx, fundCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer fundCancel()
+			if err := lg.accountMgr.GenerateDynamicAccounts(dynamicCount); err != nil {
+				lg.setError(fmt.Sprintf("failed to generate accounts: %v", err))
+				return
+			}
+			lg.initAccountsGen = dynamicCount
 
-		// Fund accounts (progress is tracked via accountMgr.GetAccountsFunded)
-		// Use builderClient for sending TXs, l2Client for syncing nonces from chain
-		if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.builderClient, lg.l2Client); err != nil {
-			lg.logger.Warn("failed to fund some dynamic accounts", "error", err)
-			// Check if ANY accounts were funded - if not, abort the test
-		}
-		lg.initFundingSent = lg.accountMgr.GetAccountsFunded()
-		if lg.initFundingSent == 0 {
-			lg.setError(fmt.Sprintf("failed to fund any accounts (0/%d funded) - cannot start test", dynamicCount))
-			return
-		}
+			if err := lg.resetBuilderNonces(); err != nil {
+				lg.setError(fmt.Sprintf("failed to reset builder nonces: %v (cannot start test with stale cache)", err))
+				return
+			}
 
-		// Phase: Waiting for funding
-		lg.initPhase = types.InitPhaseWaitingForFunding
-		fundedCount := lg.accountMgr.GetAccountsFunded()
-		blocksNeeded := (fundedCount / 4000) + 3 // ~4000 txs/block + 3 block buffer
-		waitTime := time.Duration(blocksNeeded) * time.Second
-		if waitTime < 5*time.Second {
-			waitTime = 5 * time.Second // Minimum 5 seconds
-		}
-		lg.initProgress = fmt.Sprintf("Waiting for %d funding TXs to be included (~%ds)...", fundedCount, int(waitTime.Seconds()))
-		lg.logger.Info("waiting for funding transactions to be included",
-			"fundedAccounts", fundedCount,
-			"blocksNeeded", blocksNeeded,
-			"waitTime", waitTime)
-		time.Sleep(waitTime)
+			lg.initPhase = types.InitPhaseFundingAccts
+			lg.initFundingTotal = dynamicCount
+			lg.initProgress = fmt.Sprintf("Funding %d accounts from faucet...", dynamicCount)
+			lg.logger.Info("funding dynamic accounts from faucet")
 
-		// Phase: Init nonces for dynamic accounts
-		lg.initPhase = types.InitPhaseInitNonces
-		lg.initProgress = "Initializing nonces for dynamic accounts..."
-		// CRITICAL: Use builderClient to sync through builder (eth_getPendingNonce)
-		// This ensures load generator and builder have the same nonce view
-		if err := lg.accountMgr.InitializeDynamicNonces(fundCtx, lg.builderClient); err != nil {
-			lg.logger.Warn("failed to initialize dynamic nonces", "error", err)
+			fundCtx, fundCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer fundCancel()
+
+			if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.builderClient, lg.l2Client); err != nil {
+				lg.logger.Warn("failed to fund some dynamic accounts", "error", err)
+			}
+			lg.initFundingSent = lg.accountMgr.GetAccountsFunded()
+			if lg.initFundingSent == 0 {
+				lg.setError(fmt.Sprintf("failed to fund any accounts (0/%d funded) - cannot start test", dynamicCount))
+				return
+			}
+
+			lg.initPhase = types.InitPhaseWaitingForFunding
+			fundedCount := lg.accountMgr.GetAccountsFunded()
+			blocksNeeded := (fundedCount / 4000) + 3
+			waitTime := time.Duration(blocksNeeded) * time.Second
+			if waitTime < 5*time.Second {
+				waitTime = 5 * time.Second
+			}
+			lg.initProgress = fmt.Sprintf("Waiting for %d funding TXs to be included (~%ds)...", fundedCount, int(waitTime.Seconds()))
+			lg.logger.Info("waiting for funding transactions to be included",
+				"fundedAccounts", fundedCount,
+				"blocksNeeded", blocksNeeded,
+				"waitTime", waitTime)
+			time.Sleep(waitTime)
+
+			lg.initPhase = types.InitPhaseInitNonces
+			lg.initProgress = "Initializing nonces for dynamic accounts..."
+			if err := lg.accountMgr.InitializeDynamicNonces(fundCtx, lg.builderClient); err != nil {
+				lg.logger.Warn("failed to initialize dynamic nonces", "error", err)
+			}
+
+			// Persist newly generated accounts for future reuse
+			lg.saveDynamicAccountsToCache(chainID)
 		}
 	}
 
@@ -3424,7 +3432,6 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 	}
 
 	// Check if Uniswap contracts are needed but not yet deployed
-	// The UniswapV3SwapBuilder tracks its own deployment state separately from base contracts
 	uniswapNeeded := false
 	var uniswapBuilder *txbuilder.UniswapV3SwapBuilder
 	if cb, ok := lg.txBuilderReg.GetComplexBuilder(txType); ok && cb.IsComplex() {
@@ -3451,6 +3458,15 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	cacheChainID := lg.cfg.ChainID
+
+	// Try to restore contracts from cache
+	if lg.cacheStorage != nil && !lg.contractsDeployed {
+		if lg.tryRestoreCachedContracts(ctx, cacheChainID, uniswapNeeded, uniswapBuilder) {
+			return nil
+		}
+	}
+
 	// Deploy Uniswap V3 contracts if needed (and not already deployed)
 	if uniswapNeeded && uniswapBuilder != nil {
 		lg.logger.Info("deploying Uniswap V3 contracts (complex builder)")
@@ -3458,7 +3474,6 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		chainID := big.NewInt(lg.cfg.ChainID)
 		gasPrice := big.NewInt(lg.cfg.GasPrice)
 
-		// Progress callback to update initContractsDone incrementally
 		uniswapProgress := func(name string, done, total int) {
 			lg.statusMu.Lock()
 			lg.initContractsDone = done
@@ -3466,12 +3481,11 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 			lg.statusMu.Unlock()
 		}
 
-		// Deploy Uniswap V3 contracts with progress
 		if err := uniswapBuilder.DeployContractsWithProgress(ctx, lg.builderClient, deployerAcc, chainID, gasPrice, lg.logger, uniswapProgress); err != nil {
 			return fmt.Errorf("failed to deploy Uniswap V3 contracts: %w", err)
 		}
 
-		// Set up all accounts for Uniswap swapping (both built-in and dynamic)
+		// Set up all accounts for Uniswap swapping
 		dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
 		totalAccounts := len(accounts) + len(dynamicAccounts)
 		lg.logger.Info("setting up accounts for Uniswap swaps...", slog.Int("builtIn", len(accounts)), slog.Int("dynamic", len(dynamicAccounts)))
@@ -3487,23 +3501,32 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		}
 
 		lg.logger.Info("Uniswap V3 contracts deployed and accounts setup")
-
-		// Wait for Uniswap transactions to be mined before deploying base contracts
-		// This prevents nonce collisions since ProvisionLiquidity sends txs without confirmation
-		// SetupAccounts already waits for the final TX of each account, but we add extra buffer
-		// to ensure all TXs are fully confirmed before test starts
 		lg.logger.Info("waiting for Uniswap transactions to settle...")
 		time.Sleep(5 * time.Second)
+
+		// Cache Uniswap contract addresses
+		lg.saveUniswapContractsToCache(ctx, cacheChainID, uniswapBuilder)
+
+		// Mark all dynamic accounts as uniswap-ready in cache
+		if lg.cacheStorage != nil {
+			dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
+			addresses := make([]string, len(dynamicAccounts))
+			for i, acc := range dynamicAccounts {
+				addresses[i] = acc.Address.Hex()
+			}
+			if err := lg.cacheStorage.MarkAccountsUniswapReady(ctx, cacheChainID, addresses); err != nil {
+				lg.logger.Warn("failed to mark accounts as uniswap-ready", "error", err)
+			}
+		}
 	}
 
 	// Deploy base contracts (ERC20, GasConsumer, etc) if not already deployed
 	if !lg.contractsDeployed {
 		lg.logger.Info("Deploying base contracts...")
 
-		// Progress callback for base contracts - offset by Uniswap contracts if deployed
 		baseContractOffset := 0
 		if uniswapNeeded {
-			baseContractOffset = 7 // After Uniswap's 7 steps
+			baseContractOffset = 7
 		}
 		baseProgress := func(name string, done, total int) {
 			lg.statusMu.Lock()
@@ -3517,19 +3540,16 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 			return fmt.Errorf("failed to deploy contracts: %w", err)
 		}
 
-		// Store addresses from the results map
 		lg.erc20Contract = results["ERC20"]
 		lg.gasConsumerContract = results["GasConsumer"]
 		lg.contractsDeployed = true
 
-		// Set contract addresses on the builders (for non-complex builders)
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Transfer); err == nil {
 			builder.SetContractAddress(lg.erc20Contract)
 		}
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Approve); err == nil {
 			builder.SetContractAddress(lg.erc20Contract)
 		}
-		// Note: UniswapV3SwapBuilder sets its own addresses via DeployContracts
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeStorageWrite); err == nil {
 			builder.SetContractAddress(lg.gasConsumerContract)
 		}
@@ -3541,9 +3561,389 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 			"erc20", lg.erc20Contract.Hex(),
 			"gasConsumer", lg.gasConsumerContract.Hex(),
 		)
+
+		// Cache base contract addresses
+		lg.saveBaseContractsToCache(ctx, cacheChainID)
 	}
 
 	return nil
+}
+
+// tryRestoreCachedContracts attempts to restore contracts from cache.
+// Returns true if all needed contracts were restored successfully.
+func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID int64, uniswapNeeded bool, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) bool {
+	cached, err := lg.cacheStorage.LoadCachedContracts(ctx, chainID)
+	if err != nil {
+		lg.logger.Warn("failed to load cached contracts", "error", err)
+		return false
+	}
+	if len(cached) == 0 {
+		return false
+	}
+
+	// Build name→address map for validation
+	cachedMap := make(map[string]string, len(cached))
+	for _, c := range cached {
+		cachedMap[c.Name] = c.Address
+	}
+
+	// Validate all cached contracts still exist on-chain
+	valid, invalid := lg.deployer.ValidateCachedContracts(ctx, cachedMap)
+	if len(invalid) > 0 {
+		lg.logger.Info("some cached contracts are invalid, deploying fresh",
+			slog.Int("valid", len(valid)),
+			slog.Int("invalid", len(invalid)),
+		)
+		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
+		return false
+	}
+
+	// Restore base contracts
+	erc20Addr, hasERC20 := valid["ERC20"]
+	gasConsumerAddr, hasGasConsumer := valid["GasConsumer"]
+	if !hasERC20 || !hasGasConsumer {
+		lg.logger.Info("base contracts not in cache, deploying fresh")
+		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
+		return false
+	}
+
+	lg.erc20Contract = erc20Addr
+	lg.gasConsumerContract = gasConsumerAddr
+	lg.contractsDeployed = true
+
+	if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Transfer); err == nil {
+		builder.SetContractAddress(lg.erc20Contract)
+	}
+	if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Approve); err == nil {
+		builder.SetContractAddress(lg.erc20Contract)
+	}
+	if builder, err := lg.txBuilderReg.Get(types.TxTypeStorageWrite); err == nil {
+		builder.SetContractAddress(lg.gasConsumerContract)
+	}
+	if builder, err := lg.txBuilderReg.Get(types.TxTypeHeavyCompute); err == nil {
+		builder.SetContractAddress(lg.gasConsumerContract)
+	}
+
+	lg.logger.Info("restored cached base contracts",
+		"erc20", lg.erc20Contract.Hex(),
+		"gasConsumer", lg.gasConsumerContract.Hex(),
+	)
+
+	// Restore Uniswap contracts if needed
+	if uniswapNeeded && uniswapBuilder != nil {
+		weth9, hasWETH9 := valid["uniswap:WETH9"]
+		usdc, hasUSDC := valid["uniswap:USDC"]
+		factory, hasFactory := valid["uniswap:Factory"]
+		swapRouter, hasRouter := valid["uniswap:SwapRouter"]
+		nftManager, hasNFT := valid["uniswap:NonfungiblePositionManager"]
+		pool, hasPool := valid["uniswap:Pool"]
+
+		if !hasWETH9 || !hasUSDC || !hasFactory || !hasRouter || !hasNFT || !hasPool {
+			lg.logger.Info("Uniswap contracts not fully cached, deploying fresh")
+			lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
+			// Reset base contract state so they get re-cached with uniswap
+			lg.contractsDeployed = false
+			return false
+		}
+
+		contracts := &uniswapv3.DeployedContracts{
+			WETH9:                      weth9,
+			USDC:                       usdc,
+			Factory:                    factory,
+			SwapRouter:                 swapRouter,
+			NonfungiblePositionManager: nftManager,
+			Pool:                       pool,
+		}
+		uniswapBuilder.RestoreContracts(contracts)
+
+		lg.logger.Info("restored cached Uniswap V3 contracts",
+			"pool", pool.Hex(),
+			"swapRouter", swapRouter.Hex(),
+		)
+
+		// Setup accounts that aren't yet uniswap-ready
+		lg.setupUniswapAccountsFromCache(ctx, chainID, uniswapBuilder)
+	}
+
+	return true
+}
+
+// setupUniswapAccountsFromCache sets up only accounts that aren't marked as uniswap-ready.
+func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chainID int64, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) {
+	// Load cached accounts to check uniswap_ready flag
+	cached, err := lg.cacheStorage.LoadCachedAccounts(ctx, chainID)
+	if err != nil {
+		lg.logger.Warn("failed to load cached accounts for uniswap check", "error", err)
+		return
+	}
+
+	readySet := make(map[string]bool, len(cached))
+	for _, ca := range cached {
+		if ca.UniswapReady {
+			readySet[ca.Address] = true
+		}
+	}
+
+	// Collect accounts that need Uniswap setup
+	allBuiltIn := lg.accountMgr.GetAccounts()
+	dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
+
+	var needSetup []any
+	for _, acc := range allBuiltIn {
+		if !readySet[acc.Address.Hex()] {
+			needSetup = append(needSetup, acc)
+		}
+	}
+	for _, acc := range dynamicAccounts {
+		if !readySet[acc.Address.Hex()] {
+			needSetup = append(needSetup, acc)
+		}
+	}
+
+	if len(needSetup) == 0 {
+		lg.logger.Info("all accounts already uniswap-ready from cache")
+		return
+	}
+
+	lg.logger.Info("setting up non-ready accounts for Uniswap",
+		slog.Int("needSetup", len(needSetup)),
+		slog.Int("alreadyReady", len(readySet)),
+	)
+
+	bigChainID := big.NewInt(lg.cfg.ChainID)
+	gasPrice := big.NewInt(lg.cfg.GasPrice)
+	if err := uniswapBuilder.SetupAccounts(ctx, needSetup, lg.builderClient, bigChainID, gasPrice); err != nil {
+		lg.logger.Warn("failed to setup accounts for Uniswap", "error", err)
+		return
+	}
+
+	// Mark newly-setup accounts as uniswap-ready in cache
+	newAddresses := make([]string, 0, len(needSetup))
+	for _, a := range needSetup {
+		if acc, ok := a.(*account.Account); ok {
+			newAddresses = append(newAddresses, acc.Address.Hex())
+		}
+	}
+	if err := lg.cacheStorage.MarkAccountsUniswapReady(ctx, chainID, newAddresses); err != nil {
+		lg.logger.Warn("failed to mark accounts as uniswap-ready", "error", err)
+	}
+}
+
+// saveBaseContractsToCache persists base contract addresses to cache.
+func (lg *LoadGenerator) saveBaseContractsToCache(ctx context.Context, chainID int64) {
+	if lg.cacheStorage == nil {
+		return
+	}
+
+	now := time.Now()
+	contracts := []storage.CachedContract{
+		{Name: "ERC20", Address: lg.erc20Contract.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "GasConsumer", Address: lg.gasConsumerContract.Hex(), ChainID: chainID, CreatedAt: now},
+	}
+	for _, c := range contracts {
+		if err := lg.cacheStorage.SaveCachedContract(ctx, c); err != nil {
+			lg.logger.Warn("failed to cache contract", "name", c.Name, "error", err)
+		}
+	}
+	lg.logger.Info("cached base contract addresses")
+}
+
+// saveUniswapContractsToCache persists Uniswap contract addresses to cache.
+func (lg *LoadGenerator) saveUniswapContractsToCache(ctx context.Context, chainID int64, ub *txbuilder.UniswapV3SwapBuilder) {
+	if lg.cacheStorage == nil {
+		return
+	}
+
+	contracts := ub.GetContracts()
+	if contracts == nil {
+		return
+	}
+
+	now := time.Now()
+	entries := []storage.CachedContract{
+		{Name: "uniswap:WETH9", Address: contracts.WETH9.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "uniswap:USDC", Address: contracts.USDC.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "uniswap:Factory", Address: contracts.Factory.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "uniswap:SwapRouter", Address: contracts.SwapRouter.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "uniswap:NonfungiblePositionManager", Address: contracts.NonfungiblePositionManager.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "uniswap:Pool", Address: contracts.Pool.Hex(), ChainID: chainID, CreatedAt: now},
+	}
+	for _, c := range entries {
+		if err := lg.cacheStorage.SaveCachedContract(ctx, c); err != nil {
+			lg.logger.Warn("failed to cache uniswap contract", "name", c.Name, "error", err)
+		}
+	}
+	lg.logger.Info("cached Uniswap V3 contract addresses")
+}
+
+// tryWarmStartAccounts attempts to load cached accounts for warm start.
+// Returns true if warm start succeeded (accounts are ready to use).
+func (lg *LoadGenerator) tryWarmStartAccounts(dynamicCount int, chainID int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cached, err := lg.cacheStorage.LoadCachedAccounts(ctx, chainID)
+	if err != nil {
+		lg.logger.Warn("failed to load cached accounts", "error", err)
+		return false
+	}
+	if len(cached) == 0 {
+		lg.logger.Info("no cached accounts found, cold start required")
+		return false
+	}
+
+	lg.logger.Info("loaded cached accounts, validating balances...",
+		slog.Int("cached", len(cached)),
+		slog.Int("needed", dynamicCount),
+	)
+
+	// Reconstruct Account objects from cached hex keys
+	cachedAccounts := make([]*account.Account, 0, len(cached))
+	for _, ca := range cached {
+		acc, err := account.NewAccountFromHex(ca.PrivateKeyHex)
+		if err != nil {
+			lg.logger.Warn("invalid cached key, discarding cache", "error", err)
+			lg.cacheStorage.DeleteCachedAccounts(ctx, chainID)
+			return false
+		}
+		cachedAccounts = append(cachedAccounts, acc)
+	}
+
+	// Validate balances (1 ETH minimum)
+	minBalance, _ := new(big.Int).SetString("1000000000000000000", 10) // 1 ETH
+	lg.initPhase = types.InitPhaseGeneratingAccts
+	lg.initProgress = "Validating cached account balances..."
+
+	funded, unfunded := lg.accountMgr.ValidateBalances(ctx, lg.l2Client, cachedAccounts, minBalance)
+
+	// If ALL accounts have zero balance, assume re-genesis
+	if len(funded) == 0 {
+		lg.logger.Info("all cached accounts have zero balance (re-genesis detected), wiping cache")
+		lg.cacheStorage.DeleteCachedAccounts(ctx, chainID)
+		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
+		return false
+	}
+
+	lg.logger.Info("cached account balance validation complete",
+		slog.Int("funded", len(funded)),
+		slog.Int("unfunded", len(unfunded)),
+		slog.Int("needed", dynamicCount),
+	)
+
+	// Determine which accounts to use
+	var allAccounts []*account.Account
+	needNew := 0
+
+	if len(funded) >= dynamicCount {
+		// Have enough funded accounts — use first N
+		allAccounts = funded[:dynamicCount]
+	} else {
+		// Start with all funded accounts
+		allAccounts = funded
+
+		// Re-fund the unfunded subset
+		if len(unfunded) > 0 {
+			toRefund := unfunded
+			if len(funded)+len(toRefund) > dynamicCount {
+				toRefund = toRefund[:dynamicCount-len(funded)]
+			}
+
+			if len(toRefund) > 0 {
+				lg.initPhase = types.InitPhaseFundingAccts
+				lg.initProgress = fmt.Sprintf("Re-funding %d cached accounts...", len(toRefund))
+
+				if err := lg.resetBuilderNonces(); err != nil {
+					lg.logger.Warn("failed to reset builder nonces for re-funding", "error", err)
+					return false
+				}
+
+				if err := lg.accountMgr.FundAccounts(ctx, lg.builderClient, lg.l2Client, toRefund); err != nil {
+					lg.logger.Warn("failed to re-fund cached accounts", "error", err)
+				} else {
+					allAccounts = append(allAccounts, toRefund...)
+				}
+			}
+		}
+
+		// Generate + fund additional accounts if still short
+		if len(allAccounts) < dynamicCount {
+			needNew = dynamicCount - len(allAccounts)
+			lg.initPhase = types.InitPhaseGeneratingAccts
+			lg.initProgress = fmt.Sprintf("Generating %d additional accounts...", needNew)
+
+			if err := lg.accountMgr.GenerateDynamicAccounts(needNew); err != nil {
+				lg.logger.Warn("failed to generate additional accounts", "error", err)
+				// Continue with what we have
+			} else {
+				newAccounts := lg.accountMgr.GetDynamicAccounts()
+
+				lg.initPhase = types.InitPhaseFundingAccts
+				lg.initProgress = fmt.Sprintf("Funding %d new accounts...", needNew)
+
+				if err := lg.resetBuilderNonces(); err != nil {
+					lg.logger.Warn("failed to reset builder nonces", "error", err)
+				}
+
+				if err := lg.accountMgr.FundDynamicAccounts(ctx, lg.builderClient, lg.l2Client); err != nil {
+					lg.logger.Warn("failed to fund new accounts", "error", err)
+				}
+
+				allAccounts = append(allAccounts, newAccounts...)
+			}
+		}
+	}
+
+	// Set the accounts on the manager
+	lg.accountMgr.SetDynamicAccounts(allAccounts)
+	lg.initAccountsGen = len(allAccounts)
+	lg.initFundingSent = len(allAccounts)
+
+	// Init nonces for cached accounts
+	lg.initPhase = types.InitPhaseInitNonces
+	lg.initProgress = "Initializing nonces for cached accounts..."
+	if err := lg.accountMgr.InitializeDynamicNonces(ctx, lg.builderClient); err != nil {
+		lg.logger.Warn("failed to initialize cached account nonces", "error", err)
+	}
+
+	// Persist any newly generated accounts back to cache
+	if needNew > 0 {
+		lg.saveDynamicAccountsToCache(chainID)
+	}
+
+	lg.logger.Info("warm start complete",
+		slog.Int("totalAccounts", len(allAccounts)),
+		slog.Int("fromCache", len(allAccounts)-needNew),
+		slog.Int("newlyGenerated", needNew),
+	)
+	return true
+}
+
+// saveDynamicAccountsToCache persists current dynamic accounts to the cache.
+func (lg *LoadGenerator) saveDynamicAccountsToCache(chainID int64) {
+	if lg.cacheStorage == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pairs := lg.accountMgr.ExportDynamicAccountKeys()
+	cached := make([]storage.CachedAccount, len(pairs))
+	now := time.Now()
+	for i, p := range pairs {
+		cached[i] = storage.CachedAccount{
+			Address:       p.Address,
+			PrivateKeyHex: p.PrivateKeyHex,
+			ChainID:       chainID,
+			CreatedAt:     now,
+		}
+	}
+
+	if err := lg.cacheStorage.SaveCachedAccounts(ctx, cached); err != nil {
+		lg.logger.Warn("failed to save accounts to cache", "error", err)
+	} else {
+		lg.logger.Info("saved accounts to cache", slog.Int("count", len(cached)))
+	}
 }
 
 // setError sets the test error state.
