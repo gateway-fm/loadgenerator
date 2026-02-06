@@ -1,6 +1,8 @@
 # Compiled binaries
 loadgen
 load-generator
+loadgen-mcp
+mcp
 *.exe
 *.test
 

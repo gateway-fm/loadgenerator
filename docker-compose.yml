@@ -1,0 +1,25 @@
+services:
+  loadgenerator:
+    build: .
+    ports:
+      - "${LISTEN_PORT:-13001}:3001"
+    environment:
+      - BUILDER_RPC_URL=${BUILDER_RPC_URL:-http://host.docker.internal:13000}
+      - L2_RPC_URL=${L2_RPC_URL:-http://host.docker.internal:13000}
+      - L2_WS_URL=${L2_WS_URL:-ws://host.docker.internal:8546}
+      - PRECONF_WS_URL=${PRECONF_WS_URL:-ws://host.docker.internal:13002/ws/preconfirmations}
+      - LISTEN_ADDR=:3001
+      - DATABASE_PATH=/data/loadgen.db
+      - EXECUTION_LAYER=${EXECUTION_LAYER:-reth}
+      - BLOCK_TIME_MS=${BLOCK_TIME_MS:-150}
+    volumes:
+      - loadgen-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  loadgen-data:
