@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -4547,6 +4548,14 @@ func main() {
 		level = slog.LevelInfo
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+
+	// Start pprof server on separate port for profiling
+	go func() {
+		logger.Info("pprof listening", "addr", ":6061")
+		if err := http.ListenAndServe(":6061", nil); err != nil {
+			logger.Error("pprof server failed", "error", err)
+		}
+	}()
 
 	// Initialize storage
 	store, err := storage.NewSQLiteStorage(*databasePath)

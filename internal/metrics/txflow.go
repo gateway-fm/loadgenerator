@@ -115,28 +115,35 @@ func NewTxFlowTracker() *TxFlowTracker {
 func (t *TxFlowTracker) RecordStage(txHash common.Hash, stage TxStage, timestamp time.Time) {
 	transition := StageTransition{Stage: stage, Timestamp: timestamp}
 
-	// Load or create flow
-	val, loaded := t.flows.LoadOrStore(txHash, &TxFlow{
-		Stages: []StageTransition{transition},
-	})
-
-	if loaded {
-		// Flow exists, append stage
+	// Fast path: try Load first to avoid allocation when entry exists
+	val, ok := t.flows.Load(txHash)
+	if ok {
 		flow := val.(*TxFlow)
 		flow.Stages = append(flow.Stages, transition)
 	} else {
-		// New flow created
-		atomic.AddUint64(&t.totalTracked, 1)
+		// Create new flow with pre-allocated capacity for typical 3-4 stages
+		stages := make([]StageTransition, 1, 4)
+		stages[0] = transition
+		val, ok = t.flows.LoadOrStore(txHash, &TxFlow{Stages: stages})
+		if ok {
+			// Another goroutine won the race, append to existing
+			flow := val.(*TxFlow)
+			flow.Stages = append(flow.Stages, transition)
+		} else {
+			atomic.AddUint64(&t.totalTracked, 1)
+		}
 	}
 
-	// Update atomic counters
 	atomic.AddUint64(&t.totalStages, 1)
 
-	// Update pattern counters when we reach terminal states
+	// On terminal states: update counters then delete entry to bound memory.
+	// Stats use atomic counters so deleting the entry is safe.
 	if stage == StageConfirmed {
 		t.updateConfirmedCounters(txHash)
+		t.flows.Delete(txHash)
 	} else if stage == StageFailed {
 		atomic.AddUint64(&t.failedFlow, 1)
+		t.flows.Delete(txHash)
 	}
 }
 
@@ -196,6 +203,7 @@ func (t *TxFlowTracker) GetStats() *FlowStats {
 }
 
 // GetDetailedStats returns stats with per-stage breakdown (more expensive).
+// Note: Only includes in-flight transactions (completed flows are cleaned up).
 func (t *TxFlowTracker) GetDetailedStats() *FlowStats {
 	stats := t.GetStats()
 
