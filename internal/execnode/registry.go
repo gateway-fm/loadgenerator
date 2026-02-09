@@ -98,5 +98,6 @@ func CDKErigonCapabilities() *ExecutionLayerCapabilities {
 		SupportsPreconfirmations: false,
 		SupportsBuilderStatusAPI: false,
 		SupportsBlockMetricsWS:   false,
+		RequiresLegacyTx:         true,
 	}
 }

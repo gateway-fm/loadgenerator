@@ -97,6 +97,14 @@ func (m *mockClient) GetTransactionReceiptsBatch(ctx context.Context, txHashes [
 	return nil, nil
 }
 
+func (m *mockClient) SendRawTransactionBatch(ctx context.Context, txRLPs [][]byte) []error {
+	errs := make([]error, len(txRLPs))
+	for i, rlp := range txRLPs {
+		errs[i] = m.SendRawTransaction(ctx, rlp)
+	}
+	return errs
+}
+
 // mockMetrics implements metrics.Collector for testing.
 type mockMetrics struct {
 	txSent      int32 // atomic

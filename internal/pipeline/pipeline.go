@@ -27,24 +27,26 @@ type Result struct {
 
 // Pipeline handles the complete transaction lifecycle.
 type Pipeline struct {
-	builder  txbuilder.Builder
-	signer   types.Signer
-	sender   *sender.Sender
-	metrics  metrics.Collector
-	chainID  *big.Int
-	gasPrice *big.Int
-	logger   *slog.Logger
+	builder   txbuilder.Builder
+	signer    types.Signer
+	sender    *sender.Sender
+	metrics   metrics.Collector
+	chainID   *big.Int
+	gasPrice  *big.Int
+	useLegacy bool
+	logger    *slog.Logger
 }
 
 // Config for creating a Pipeline.
 type Config struct {
-	Builder  txbuilder.Builder
-	Signer   types.Signer
-	Sender   *sender.Sender
-	Metrics  metrics.Collector
-	ChainID  *big.Int
-	GasPrice *big.Int
-	Logger   *slog.Logger
+	Builder   txbuilder.Builder
+	Signer    types.Signer
+	Sender    *sender.Sender
+	Metrics   metrics.Collector
+	ChainID   *big.Int
+	GasPrice  *big.Int
+	UseLegacy bool // Use legacy (type 0) transactions instead of EIP-1559
+	Logger    *slog.Logger
 }
 
 // New creates a new Pipeline.
@@ -55,13 +57,14 @@ func New(cfg Config) *Pipeline {
 	}
 
 	return &Pipeline{
-		builder:  cfg.Builder,
-		signer:   cfg.Signer,
-		sender:   cfg.Sender,
-		metrics:  cfg.Metrics,
-		chainID:  cfg.ChainID,
-		gasPrice: cfg.GasPrice,
-		logger:   logger,
+		builder:   cfg.Builder,
+		signer:    cfg.Signer,
+		sender:    cfg.Sender,
+		metrics:   cfg.Metrics,
+		chainID:   cfg.ChainID,
+		gasPrice:  cfg.GasPrice,
+		useLegacy: cfg.UseLegacy,
+		logger:    logger,
 	}
 }
 
@@ -77,6 +80,7 @@ func (p *Pipeline) Execute(acc *account.Account) Result {
 		Nonce:     n.Value(),
 		GasTipCap: p.gasPrice,
 		GasFeeCap: p.gasPrice,
+		UseLegacy: p.useLegacy,
 	})
 	if err != nil {
 		n.Rollback() // Sync error: rollback immediately
@@ -141,6 +145,7 @@ func (p *Pipeline) ExecuteWithGas(acc *account.Account, gasPrice *big.Int) Resul
 		Nonce:     n.Value(),
 		GasTipCap: gasPrice,
 		GasFeeCap: gasPrice,
+		UseLegacy: p.useLegacy,
 	})
 	if err != nil {
 		n.Rollback() // Sync error: rollback immediately

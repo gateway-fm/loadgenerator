@@ -7,7 +7,7 @@ import (
 )
 
 func TestExportDynamicAccountKeys(t *testing.T) {
-	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), slog.Default())
+	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestExportDynamicAccountKeys(t *testing.T) {
 }
 
 func TestSetDynamicAccounts(t *testing.T) {
-	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), slog.Default())
+	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSetDynamicAccounts(t *testing.T) {
 	}
 
 	// Create fresh manager and set accounts
-	mgr2, _ := NewManager(big.NewInt(42069), big.NewInt(1e9), slog.Default())
+	mgr2, _ := NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
 	mgr2.SetDynamicAccounts(accs)
 
 	if got := mgr2.GetAccountsFunded(); got != 3 {
@@ -84,7 +84,7 @@ func TestSetDynamicAccounts(t *testing.T) {
 }
 
 func TestExportDynamicAccountKeys_Empty(t *testing.T) {
-	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), slog.Default())
+	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestExportDynamicAccountKeys_Empty(t *testing.T) {
 }
 
 func TestSetDynamicAccountsOverwrite(t *testing.T) {
-	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), slog.Default())
+	mgr, err := NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

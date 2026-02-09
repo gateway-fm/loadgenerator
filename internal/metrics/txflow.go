@@ -138,11 +138,18 @@ func (t *TxFlowTracker) RecordStage(txHash common.Hash, stage TxStage, timestamp
 
 	// On terminal states: update counters then delete entry to bound memory.
 	// Stats use atomic counters so deleting the entry is safe.
-	if stage == StageConfirmed {
+	// Terminal states: confirmed, failed, dropped, revoked.
+	// (Requeued is NOT terminal - TX will be retried in a later block.)
+	switch stage {
+	case StageConfirmed:
 		t.updateConfirmedCounters(txHash)
 		t.flows.Delete(txHash)
-	} else if stage == StageFailed {
+	case StageFailed:
 		atomic.AddUint64(&t.failedFlow, 1)
+		t.flows.Delete(txHash)
+	case StageDropped:
+		t.flows.Delete(txHash)
+	case StageRevoked:
 		t.flows.Delete(txHash)
 	}
 }

@@ -26,6 +26,10 @@ type ExecutionLayerCapabilities struct {
 	// SupportsBlockMetricsWS indicates whether the block-builder's
 	// /ws/block-metrics WebSocket endpoint is available.
 	SupportsBlockMetricsWS bool
+
+	// RequiresLegacyTx indicates that the node only accepts legacy (type 0) transactions.
+	// When true, all transactions must use LegacyTx instead of DynamicFeeTx (EIP-1559).
+	RequiresLegacyTx bool
 }
 
 // String returns the canonical name of the execution layer.

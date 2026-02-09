@@ -52,16 +52,7 @@ func (b *StorageWriteBuilder) Build(params TxParams) (*types.Transaction, error)
 	// Use nonce as the value to store for variety
 	data := encodeStorageWrite(new(big.Int).SetUint64(params.Nonce))
 
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:   params.ChainID,
-		Nonce:     params.Nonce,
-		GasTipCap: params.GasTipCap,
-		GasFeeCap: params.GasFeeCap,
-		Gas:       b.GasLimit(),
-		To:        &b.contractAddress,
-		Value:     big.NewInt(0),
-		Data:      data,
-	}), nil
+	return NewTransferTx(params.ChainID, params.Nonce, b.contractAddress, big.NewInt(0), b.GasLimit(), params.GasTipCap, params.GasFeeCap, data, params.UseLegacy), nil
 }
 
 // RequiresContract returns true - storage write needs a contract.

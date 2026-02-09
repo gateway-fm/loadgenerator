@@ -123,16 +123,7 @@ func (b *ERC20TransferBuilder) Build(params TxParams) (*types.Transaction, error
 
 	data := encodeERC20Transfer(recipient, big.NewInt(1))
 
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:   params.ChainID,
-		Nonce:     params.Nonce,
-		GasTipCap: params.GasTipCap,
-		GasFeeCap: params.GasFeeCap,
-		Gas:       b.GasLimit(),
-		To:        &b.contractAddress,
-		Value:     big.NewInt(0),
-		Data:      data,
-	}), nil
+	return NewTransferTx(params.ChainID, params.Nonce, b.contractAddress, big.NewInt(0), b.GasLimit(), params.GasTipCap, params.GasFeeCap, data, params.UseLegacy), nil
 }
 
 // RequiresContract returns true - ERC20 needs a deployed contract.
@@ -182,16 +173,7 @@ func (b *ERC20ApproveBuilder) Build(params TxParams) (*types.Transaction, error)
 	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	data := encodeERC20Approve(b.spender, maxUint256)
 
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:   params.ChainID,
-		Nonce:     params.Nonce,
-		GasTipCap: params.GasTipCap,
-		GasFeeCap: params.GasFeeCap,
-		Gas:       b.GasLimit(),
-		To:        &b.contractAddress,
-		Value:     big.NewInt(0),
-		Data:      data,
-	}), nil
+	return NewTransferTx(params.ChainID, params.Nonce, b.contractAddress, big.NewInt(0), b.GasLimit(), params.GasTipCap, params.GasFeeCap, data, params.UseLegacy), nil
 }
 
 // RequiresContract returns true - uses the same ERC20 contract.

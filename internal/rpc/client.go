@@ -27,6 +27,10 @@ type Client interface {
 	// SendRawTransaction sends a signed transaction.
 	SendRawTransaction(ctx context.Context, txRLP []byte) error
 
+	// SendRawTransactionBatch sends multiple signed transactions in a single HTTP request.
+	// Returns per-TX errors in the same order as input. A nil entry means success.
+	SendRawTransactionBatch(ctx context.Context, txRLPs [][]byte) []error
+
 	// GetNonce fetches the nonce for an address.
 	GetNonce(ctx context.Context, address string) (uint64, error)
 
@@ -384,6 +388,39 @@ func (c *HTTPClient) SendRawTransaction(ctx context.Context, txRLP []byte) error
 	hexTx := hexutil.Encode(txRLP)
 	_, err := c.Call(ctx, "eth_sendRawTransaction", []interface{}{hexTx})
 	return err
+}
+
+// SendRawTransactionBatch sends multiple signed transactions in a single HTTP request.
+// Uses JSON-RPC batch mode to send all TXs in one HTTP POST, reducing per-TX overhead.
+// Returns per-TX errors in the same order as input. A nil entry means success.
+func (c *HTTPClient) SendRawTransactionBatch(ctx context.Context, txRLPs [][]byte) []error {
+	if len(txRLPs) == 0 {
+		return nil
+	}
+
+	calls := make([]BatchRequest, len(txRLPs))
+	for i, rlp := range txRLPs {
+		calls[i] = BatchRequest{
+			Method: "eth_sendRawTransaction",
+			Params: []interface{}{hexutil.Encode(rlp)},
+		}
+	}
+
+	responses, err := c.BatchCall(ctx, calls)
+	if err != nil {
+		// All failed with the same error (transport-level)
+		errs := make([]error, len(txRLPs))
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
+	}
+
+	errs := make([]error, len(txRLPs))
+	for i, resp := range responses {
+		errs[i] = resp.Error
+	}
+	return errs
 }
 
 // GetNonce fetches the nonce for an address.

@@ -90,16 +90,7 @@ func (b *UniswapV3SwapBuilder) Build(params TxParams) (*types.Transaction, error
 
 	data := uniswapv3.EncodeExactInputSingle(swapParams)
 
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:   params.ChainID,
-		Nonce:     params.Nonce,
-		GasTipCap: params.GasTipCap,
-		GasFeeCap: params.GasFeeCap,
-		Gas:       b.GasLimit(),
-		To:        &b.contracts.SwapRouter,
-		Value:     big.NewInt(0),
-		Data:      data,
-	}), nil
+	return NewTransferTx(params.ChainID, params.Nonce, b.contracts.SwapRouter, big.NewInt(0), b.GasLimit(), params.GasTipCap, params.GasFeeCap, data, params.UseLegacy), nil
 }
 
 // RequiresContract returns true - Uniswap V3 needs contracts deployed.

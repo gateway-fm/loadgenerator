@@ -28,13 +28,15 @@ type Manager struct {
 	dynamicAccounts []*Account
 	accountsFunded  int32 // atomic
 
-	chainID  *big.Int
-	gasPrice *big.Int
-	logger   *slog.Logger
+	chainID   *big.Int
+	gasPrice  *big.Int
+	useLegacy bool // Use legacy (type 0) transactions instead of EIP-1559
+	logger    *slog.Logger
 }
 
 // NewManager creates a new account manager.
-func NewManager(chainID, gasPrice *big.Int, logger *slog.Logger) (*Manager, error) {
+// useLegacy controls whether funding transactions use legacy (type 0) format.
+func NewManager(chainID, gasPrice *big.Int, useLegacy bool, logger *slog.Logger) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -45,10 +47,11 @@ func NewManager(chainID, gasPrice *big.Int, logger *slog.Logger) (*Manager, erro
 	}
 
 	return &Manager{
-		accounts: accounts,
-		chainID:  chainID,
-		gasPrice: gasPrice,
-		logger:   logger,
+		accounts:  accounts,
+		chainID:   chainID,
+		gasPrice:  gasPrice,
+		useLegacy: useLegacy,
+		logger:    logger,
 	}, nil
 }
 
@@ -484,15 +487,26 @@ func (m *Manager) fundAccountFast(
 
 	n := faucet.ReserveNonce()
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   m.chainID,
-		Nonce:     n.Value(),
-		GasTipCap: fundingTip,
-		GasFeeCap: new(big.Int).Add(m.gasPrice, fundingTip),
-		Gas:       21000,
-		To:        &recipient.Address,
-		Value:     amount,
-	})
+	var tx *types.Transaction
+	if m.useLegacy {
+		tx = types.NewTx(&types.LegacyTx{
+			Nonce:    n.Value(),
+			GasPrice: new(big.Int).Add(m.gasPrice, fundingTip),
+			Gas:      21000,
+			To:       &recipient.Address,
+			Value:    amount,
+		})
+	} else {
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   m.chainID,
+			Nonce:     n.Value(),
+			GasTipCap: fundingTip,
+			GasFeeCap: new(big.Int).Add(m.gasPrice, fundingTip),
+			Gas:       21000,
+			To:        &recipient.Address,
+			Value:     amount,
+		})
+	}
 
 	signed, err := types.SignTx(tx, signer, faucet.PrivateKey)
 	if err != nil {
@@ -536,15 +550,26 @@ func (m *Manager) fundAccount(
 	for attempt := range maxRetries {
 		n := faucet.ReserveNonce()
 
-		tx := types.NewTx(&types.DynamicFeeTx{
-			ChainID:   m.chainID,
-			Nonce:     n.Value(),
-			GasTipCap: fundingTip,
-			GasFeeCap: new(big.Int).Add(m.gasPrice, fundingTip),
-			Gas:       21000,
-			To:        &recipient.Address,
-			Value:     amount,
-		})
+		var tx *types.Transaction
+		if m.useLegacy {
+			tx = types.NewTx(&types.LegacyTx{
+				Nonce:    n.Value(),
+				GasPrice: new(big.Int).Add(m.gasPrice, fundingTip),
+				Gas:      21000,
+				To:       &recipient.Address,
+				Value:    amount,
+			})
+		} else {
+			tx = types.NewTx(&types.DynamicFeeTx{
+				ChainID:   m.chainID,
+				Nonce:     n.Value(),
+				GasTipCap: fundingTip,
+				GasFeeCap: new(big.Int).Add(m.gasPrice, fundingTip),
+				Gas:       21000,
+				To:        &recipient.Address,
+				Value:     amount,
+			})
+		}
 
 		signed, err := types.SignTx(tx, signer, faucet.PrivateKey)
 		if err != nil {
@@ -872,15 +897,26 @@ func (m *Manager) recycleAccountFunds(
 	n := from.ReserveNonce()
 	defer n.Rollback() // Auto-rollback on any error
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   m.chainID,
-		Nonce:     n.Value(),
-		GasTipCap: gasTip,
-		GasFeeCap: maxFee,
-		Gas:       gasLimit,
-		To:        &to.Address,
-		Value:     sendAmount,
-	})
+	var tx *types.Transaction
+	if m.useLegacy {
+		tx = types.NewTx(&types.LegacyTx{
+			Nonce:    n.Value(),
+			GasPrice: maxFee,
+			Gas:      gasLimit,
+			To:       &to.Address,
+			Value:    sendAmount,
+		})
+	} else {
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   m.chainID,
+			Nonce:     n.Value(),
+			GasTipCap: gasTip,
+			GasFeeCap: maxFee,
+			Gas:       gasLimit,
+			To:        &to.Address,
+			Value:     sendAmount,
+		})
+	}
 
 	signed, err := types.SignTx(tx, signer, from.PrivateKey)
 	if err != nil {

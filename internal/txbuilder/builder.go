@@ -19,6 +19,7 @@ type TxParams struct {
 	GasTipCap *big.Int
 	GasFeeCap *big.Int
 	From      common.Address // Sender address (needed for Uniswap swaps)
+	UseLegacy bool           // Use legacy (type 0) transactions instead of EIP-1559
 }
 
 // Builder builds transactions for a specific type.

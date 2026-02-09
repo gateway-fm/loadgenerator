@@ -163,7 +163,7 @@ func TestAccountGeneration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create account manager
-	manager, err := account.NewManager(chainID, gasPrice, logger)
+	manager, err := account.NewManager(chainID, gasPrice, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create account manager: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestFullLoadTestSetup(t *testing.T) {
 	gasPrice := big.NewInt(cfg.GasPrice)
 
 	// Create account manager and generate accounts
-	manager, err := account.NewManager(chainID, gasPrice, logger)
+	manager, err := account.NewManager(chainID, gasPrice, false, logger)
 	if err != nil {
 		t.Fatalf("Failed to create account manager: %v", err)
 	}

@@ -30,10 +30,11 @@ type ProgressCallback func(contractName string, deployed, total int)
 
 // Deployer handles contract deployment.
 type Deployer struct {
-	client   rpc.Client
-	chainID  *big.Int
-	gasPrice *big.Int
-	logger   *slog.Logger
+	client    rpc.Client
+	chainID   *big.Int
+	gasPrice  *big.Int
+	useLegacy bool // Use legacy (type 0) transactions instead of EIP-1559
+	logger    *slog.Logger
 }
 
 // NewDeployer creates a new contract deployer.
@@ -47,6 +48,11 @@ func NewDeployer(client rpc.Client, chainID, gasPrice *big.Int, logger *slog.Log
 		gasPrice: gasPrice,
 		logger:   logger,
 	}
+}
+
+// SetUseLegacy sets whether the deployer should use legacy (type 0) transactions.
+func (d *Deployer) SetUseLegacy(useLegacy bool) {
+	d.useLegacy = useLegacy
 }
 
 // DeployAll deploys all required contracts sequentially.
@@ -148,16 +154,7 @@ func (d *Deployer) deployContract(ctx context.Context, deployer *account.Account
 	contractAddr := crypto.CreateAddress(deployer.Address, nonce)
 
 	// Build deployment transaction
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   d.chainID,
-		Nonce:     nonce,
-		GasTipCap: big.NewInt(0),
-		GasFeeCap: d.gasPrice,
-		Gas:       3000000, // High gas limit for deployment
-		To:        nil,     // Contract creation
-		Value:     big.NewInt(0),
-		Data:      bytecode,
-	})
+	tx := txbuilder.NewContractTx(d.chainID, nonce, big.NewInt(0), 3000000, big.NewInt(0), d.gasPrice, bytecode, d.useLegacy)
 
 	// Sign transaction
 	signer := types.LatestSignerForChainID(d.chainID)

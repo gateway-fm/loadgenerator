@@ -19,10 +19,11 @@ import (
 
 // Deployer handles Uniswap V3 contract deployment and setup.
 type Deployer struct {
-	client   rpc.Client
-	chainID  *big.Int
-	gasPrice *big.Int
-	logger   *slog.Logger
+	client    rpc.Client
+	chainID   *big.Int
+	gasPrice  *big.Int
+	useLegacy bool // Use legacy (type 0) transactions instead of EIP-1559
+	logger    *slog.Logger
 }
 
 // ProgressCallback is called after each contract deployment or skip.
@@ -39,6 +40,11 @@ func NewDeployer(client rpc.Client, chainID, gasPrice *big.Int, logger *slog.Log
 		gasPrice: gasPrice,
 		logger:   logger,
 	}
+}
+
+// SetUseLegacy sets whether the deployer should use legacy (type 0) transactions.
+func (d *Deployer) SetUseLegacy(useLegacy bool) {
+	d.useLegacy = useLegacy
 }
 
 // DeployAll deploys all Uniswap V3 contracts in the correct order.
@@ -769,16 +775,28 @@ func (d *Deployer) deployContract(ctx context.Context, deployer *account.Account
 	contractAddr := ComputeContractAddress(deployer.Address, nonce)
 
 	// Build deployment transaction
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   d.chainID,
-		Nonce:     nonce,
-		GasTipCap: big.NewInt(0),
-		GasFeeCap: d.gasPrice,
-		Gas:       8000000, // High gas limit for deployment
-		To:        nil,     // Contract creation
-		Value:     big.NewInt(0),
-		Data:      bytecode,
-	})
+	var tx *types.Transaction
+	if d.useLegacy {
+		tx = types.NewTx(&types.LegacyTx{
+			Nonce:    nonce,
+			GasPrice: d.gasPrice,
+			Gas:      8000000, // High gas limit for deployment
+			To:       nil,     // Contract creation
+			Value:    big.NewInt(0),
+			Data:     bytecode,
+		})
+	} else {
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   d.chainID,
+			Nonce:     nonce,
+			GasTipCap: big.NewInt(0),
+			GasFeeCap: d.gasPrice,
+			Gas:       8000000, // High gas limit for deployment
+			To:        nil,     // Contract creation
+			Value:     big.NewInt(0),
+			Data:      bytecode,
+		})
+	}
 
 	// Sign and send
 	signedTx, err := d.signAndSendReturnHash(ctx, deployer, tx)
@@ -810,16 +828,28 @@ func (d *Deployer) sendTxReturnHash(ctx context.Context, sender *account.Account
 		value = big.NewInt(0)
 	}
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   d.chainID,
-		Nonce:     nonce,
-		GasTipCap: big.NewInt(0),
-		GasFeeCap: d.gasPrice,
-		Gas:       500000, // Generous gas limit for contract calls
-		To:        &to,
-		Value:     value,
-		Data:      data,
-	})
+	var tx *types.Transaction
+	if d.useLegacy {
+		tx = types.NewTx(&types.LegacyTx{
+			Nonce:    nonce,
+			GasPrice: d.gasPrice,
+			Gas:      500000, // Generous gas limit for contract calls
+			To:       &to,
+			Value:    value,
+			Data:     data,
+		})
+	} else {
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   d.chainID,
+			Nonce:     nonce,
+			GasTipCap: big.NewInt(0),
+			GasFeeCap: d.gasPrice,
+			Gas:       500000, // Generous gas limit for contract calls
+			To:        &to,
+			Value:     value,
+			Data:      data,
+		})
+	}
 
 	signedTx, err := d.signAndSendReturnHash(ctx, sender, tx)
 	if err != nil {
@@ -867,16 +897,28 @@ func (d *Deployer) sendTxAndWaitForReceipt(ctx context.Context, sender *account.
 		gasLimit = 8000000 // High limit for complex operations
 	}
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   d.chainID,
-		Nonce:     nonce,
-		GasTipCap: big.NewInt(0),
-		GasFeeCap: d.gasPrice,
-		Gas:       gasLimit,
-		To:        &to,
-		Value:     value,
-		Data:      data,
-	})
+	var tx *types.Transaction
+	if d.useLegacy {
+		tx = types.NewTx(&types.LegacyTx{
+			Nonce:    nonce,
+			GasPrice: d.gasPrice,
+			Gas:      gasLimit,
+			To:       &to,
+			Value:    value,
+			Data:     data,
+		})
+	} else {
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   d.chainID,
+			Nonce:     nonce,
+			GasTipCap: big.NewInt(0),
+			GasFeeCap: d.gasPrice,
+			Gas:       gasLimit,
+			To:        &to,
+			Value:     value,
+			Data:      data,
+		})
+	}
 
 	signedTx, err := d.signAndSendReturnHash(ctx, sender, tx)
 	if err != nil {

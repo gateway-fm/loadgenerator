@@ -37,16 +37,7 @@ func (b *ETHTransferBuilder) Build(params TxParams) (*types.Transaction, error) 
 	if params.ChainID == nil || params.ChainID.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("ChainID must be non-nil and non-zero")
 	}
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:   params.ChainID,
-		Nonce:     params.Nonce,
-		GasTipCap: params.GasTipCap,
-		GasFeeCap: params.GasFeeCap,
-		Gas:       b.GasLimit(),
-		To:        &b.recipient,
-		Value:     big.NewInt(1), // 1 wei
-		Data:      nil,
-	}), nil
+	return NewTransferTx(params.ChainID, params.Nonce, b.recipient, big.NewInt(1), b.GasLimit(), params.GasTipCap, params.GasFeeCap, nil, params.UseLegacy), nil
 }
 
 // RequiresContract returns false - ETH transfer doesn't need a contract.

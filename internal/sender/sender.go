@@ -76,6 +76,39 @@ func (s *Sender) TrySend(ctx context.Context, txData []byte, callback func(error
 	return ErrAtCapacity
 }
 
+// SendBatchAsync sends multiple transactions in a single HTTP request asynchronously.
+// Uses JSON-RPC batch mode to amortize HTTP overhead across all TXs in the batch.
+// Each callback[i] is called with the per-TX error for txDataSlice[i].
+// Returns true if the batch was queued, false if at capacity.
+// Only one semaphore slot is consumed for the entire batch.
+func (s *Sender) SendBatchAsync(ctx context.Context, txDataSlice [][]byte, callbacks []func(error)) bool {
+	if len(txDataSlice) == 0 {
+		return true
+	}
+
+	select {
+	case s.semaphore <- struct{}{}: // Acquired semaphore
+		go func() {
+			defer func() { <-s.semaphore }() // Release semaphore
+
+			errs := s.client.SendRawTransactionBatch(ctx, txDataSlice)
+			for i, cb := range callbacks {
+				if cb != nil {
+					var err error
+					if i < len(errs) {
+						err = errs[i]
+					}
+					cb(err)
+				}
+			}
+		}()
+		return true
+
+	default:
+		return false // At capacity
+	}
+}
+
 // Available returns the number of available send slots.
 func (s *Sender) Available() int {
 	return cap(s.semaphore) - len(s.semaphore)

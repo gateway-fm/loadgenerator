@@ -105,7 +105,7 @@ type LoadGenerator struct {
 	timeSeriesBuf []storage.TimeSeriesPoint
 	txLogBuf      []storage.TxLogEntry
 	txLogBufMu    sync.Mutex
-	pendingTxs    sync.Map // txHash -> *storage.TxLogEntry
+	pendingTxs    sync.Map // common.Hash -> *storage.TxLogEntry (uses [32]byte key, avoids hex string alloc)
 
 	// Timing
 	startTime       time.Time
@@ -251,7 +251,8 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	l2Client := rpc.NewHTTPClient(l2Cfg)
 
 	// Create account manager
-	accountMgr, err := account.NewManager(chainID, gasPrice, logger)
+	useLegacy := cfg.Capabilities != nil && cfg.Capabilities.RequiresLegacyTx
+	accountMgr, err := account.NewManager(chainID, gasPrice, useLegacy, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account manager: %w", err)
 	}
@@ -271,6 +272,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 
 	// Create contract deployer
 	deployer := contract.NewDeployer(builderClient, chainID, gasPrice, logger)
+	deployer.SetUseLegacy(useLegacy)
 
 	// Create async sender with backpressure
 	// Concurrency must be high enough to saturate target TPS:
@@ -346,8 +348,10 @@ func (lg *LoadGenerator) recordTxSent(txHash common.Hash, sentAt time.Time, acco
 		GasTipGwei:  tipGwei,
 	}
 
-	// Store in map for later confirmation tracking
-	lg.pendingTxs.Store(txHash.Hex(), entry)
+	// Store in map for later confirmation tracking.
+	// Use common.Hash ([32]byte) as key instead of txHash.Hex() string to avoid
+	// 66-byte string allocation per TX (~94 MB savings at high throughput).
+	lg.pendingTxs.Store(txHash, entry)
 
 	// Append to buffer
 	lg.txLogBufMu.Lock()
@@ -356,7 +360,7 @@ func (lg *LoadGenerator) recordTxSent(txHash common.Hash, sentAt time.Time, acco
 }
 
 // recordTxConfirmed updates a transaction as confirmed (non-blocking).
-func (lg *LoadGenerator) recordTxConfirmed(txHash string, confirmedAt time.Time) {
+func (lg *LoadGenerator) recordTxConfirmed(txHash common.Hash, confirmedAt time.Time) {
 	if !lg.txLoggingEnabled {
 		return
 	}
@@ -372,7 +376,7 @@ func (lg *LoadGenerator) recordTxConfirmed(txHash string, confirmedAt time.Time)
 }
 
 // recordTxPreconfirmed updates a transaction with preconfirmation time (non-blocking).
-func (lg *LoadGenerator) recordTxPreconfirmed(txHash string, preconfAt time.Time) {
+func (lg *LoadGenerator) recordTxPreconfirmed(txHash common.Hash, preconfAt time.Time) {
 	if !lg.txLoggingEnabled {
 		return
 	}
@@ -1652,13 +1656,14 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		// Calculate gas fee cap based on tip
 		gasFeeCap := new(big.Int).Add(tipWei, lg.gasFeeCap)
 
-		// Build transaction with EIP-1559 gas pricing
+		// Build transaction (EIP-1559 or legacy depending on execution layer)
 		tx, err := builder.Build(txbuilder.TxParams{
 			ChainID:   chainID,
 			Nonce:     n.Value(),
 			GasTipCap: tipWei,
 			GasFeeCap: gasFeeCap,
 			From:      acc.Address,
+			UseLegacy: lg.cfg.Capabilities != nil && lg.cfg.Capabilities.RequiresLegacyTx,
 		})
 		if err != nil {
 			lg.logger.Error("failed to build tx", "error", err)
@@ -2079,7 +2084,12 @@ func (lg *LoadGenerator) resyncAllNonces() {
 // resetBuilderNonces calls the block builder's /reset-nonces endpoint to clear
 // its nonce cache and pending pool. This is critical before funding new accounts
 // to prevent stale cached nonces from causing "nonce ahead" rejections.
+// Skipped when no external block builder is used (e.g., cdk-erigon mode).
 func (lg *LoadGenerator) resetBuilderNonces() error {
+	if !lg.cfg.Capabilities.HasExternalBlockBuilder {
+		lg.logger.Info("skipping builder nonce reset (no external block builder)")
+		return nil
+	}
 	lg.logger.Info("resetting block builder nonce cache...")
 
 	// Extract base URL from builder RPC URL (remove any path)
@@ -2512,14 +2522,14 @@ func (lg *LoadGenerator) processPreconfEvent(event *types.PreconfEvent) {
 			lg.preconfLatencies.Add(latency)
 		}
 		// Record preconf in TX log (non-blocking)
-		lg.recordTxPreconfirmed(event.TxHash, now)
+		lg.recordTxPreconfirmed(txHash, now)
 
 	case types.PreconfStageConfirmed:
 		// Record confirmation - RecordTxConfirmed handles the case where txHash isn't found
 		lg.metricsCol.RecordTxConfirmed(txHash, now)
 		metrics.AtomicSubSaturating(&lg.pendingCount, 1)
 		// Record confirmation in TX log (non-blocking)
-		lg.recordTxConfirmed(event.TxHash, now)
+		lg.recordTxConfirmed(txHash, now)
 		// Track recent confirmed TX for incremental verification (keep last 1000)
 		lg.recentConfirmedMu.Lock()
 		lg.recentConfirmedHashes = append(lg.recentConfirmedHashes, event.TxHash)
@@ -4344,7 +4354,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 		// Update TX log entries with final status from pendingTxs map
 		lg.txLogBufMu.Lock()
 		for i := range lg.txLogBuf {
-			if entry, ok := lg.pendingTxs.Load(lg.txLogBuf[i].TxHash); ok {
+			if entry, ok := lg.pendingTxs.Load(common.HexToHash(lg.txLogBuf[i].TxHash)); ok {
 				e := entry.(*storage.TxLogEntry)
 				lg.txLogBuf[i].ConfirmedAtMs = e.ConfirmedAtMs
 				lg.txLogBuf[i].PreconfAtMs = e.PreconfAtMs
@@ -4591,7 +4601,8 @@ func main() {
 	logger.Info("resolved execution layer capabilities",
 		"layer", cfg.ExecutionLayer,
 		"hasBlockBuilder", cfg.Capabilities.HasExternalBlockBuilder,
-		"supportsPreconf", cfg.Capabilities.SupportsPreconfirmations)
+		"supportsPreconf", cfg.Capabilities.SupportsPreconfirmations,
+		"requiresLegacyTx", cfg.Capabilities.RequiresLegacyTx)
 
 	// Create load generator
 	lg, err := NewLoadGenerator(cfg, store, logger)
