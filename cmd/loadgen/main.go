@@ -4559,10 +4559,10 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	// Start pprof server on separate port for profiling
+	// Start pprof server on localhost only (not reachable from outside the container)
 	go func() {
-		logger.Info("pprof listening", "addr", ":6061")
-		if err := http.ListenAndServe(":6061", nil); err != nil {
+		logger.Info("pprof listening", "addr", "localhost:6061")
+		if err := http.ListenAndServe("localhost:6061", nil); err != nil {
 			logger.Error("pprof server failed", "error", err)
 		}
 	}()

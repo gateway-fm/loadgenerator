@@ -33,7 +33,6 @@ WORKDIR /app
 COPY --from=builder /app/load-generator .
 
 EXPOSE 3001
-EXPOSE 6061
 
 # Health check - load-generator exposes /health endpoint
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
