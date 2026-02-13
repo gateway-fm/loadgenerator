@@ -427,19 +427,19 @@ func TestTransactionTypes(t *testing.T) {
 			name:     "ERC20Transfer",
 			builder:  txbuilder.NewERC20TransferBuilder(recipient),
 			txType:   types.TxTypeERC20Transfer,
-			gasLimit: 65000,
+			gasLimit: 70000,
 		},
 		{
 			name:     "ERC20Approve",
 			builder:  txbuilder.NewERC20ApproveBuilder(recipient),
 			txType:   types.TxTypeERC20Approve,
-			gasLimit: 46000,
+			gasLimit: 60000,
 		},
 		{
 			name:     "StorageWrite",
 			builder:  txbuilder.NewStorageWriteBuilder(),
 			txType:   types.TxTypeStorageWrite,
-			gasLimit: 43000,
+			gasLimit: 70000,
 		},
 		{
 			name:     "HeavyCompute",

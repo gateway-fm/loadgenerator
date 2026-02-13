@@ -27,10 +27,10 @@ import (
 
 // E2E test configuration from environment
 var (
-	builderRPCURL  = getEnv("BUILDER_RPC_URL", "http://localhost:13000")
-	loadGenAPIURL  = getEnv("LOADGEN_API_URL", "http://localhost:13001")
-	l2RPCURL       = getEnv("L2_RPC_URL", "http://localhost:13000")
-	preconfWSURL   = getEnv("PRECONF_WS_URL", "ws://localhost:13002/ws/preconfirmations")
+	builderRPCURL = getEnv("BUILDER_RPC_URL", "http://localhost:13000")
+	loadGenAPIURL = getEnv("LOADGEN_API_URL", "http://localhost:13001")
+	l2RPCURL      = getEnv("L2_RPC_URL", "http://localhost:13000")
+	preconfWSURL  = getEnv("PRECONF_WS_URL", "ws://localhost:13002/ws/preconfirmations")
 )
 
 func getEnv(key, fallback string) string {
@@ -42,7 +42,7 @@ func getEnv(key, fallback string) string {
 
 // skipIfNoStack skips the test if Docker Compose stack is not running.
 func skipIfNoStack(t *testing.T) {
-	resp, err := http.Get(builderRPCURL + "/health")
+	resp, err := http.Get(builderRPCURL + "/status")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Skip("Skipping E2E test: Docker Compose stack not running")
 	}
@@ -365,6 +365,9 @@ type testResult struct {
 // Helper functions
 func startLoadTest(t *testing.T, config map[string]any) string {
 	t.Helper()
+	resetLoadGenerator(t)
+
+	prevLatest := fetchLatestTestID(t)
 
 	body, _ := json.Marshal(config)
 	resp, err := http.Post(loadGenAPIURL+"/start", "application/json", bytes.NewReader(body))
@@ -385,7 +388,126 @@ func startLoadTest(t *testing.T, config map[string]any) string {
 		t.Fatalf("Failed to decode start response: %v", err)
 	}
 
+	if result.TestID == "" {
+		result.TestID = waitForNewLatestTestID(t, prevLatest, 5*time.Second)
+	}
+
 	return result.TestID
+}
+
+func resetLoadGenerator(t *testing.T) {
+	t.Helper()
+
+	status := getLoadGenStatus(t)
+	if status == "initializing" || status == "running" || status == "verifying" {
+		req, err := http.NewRequest(http.MethodPost, loadGenAPIURL+"/stop", nil)
+		if err != nil {
+			t.Fatalf("failed to build stop request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to stop load generator: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	waitForLoadGenTerminal(t, 30*time.Second)
+
+	req, err := http.NewRequest(http.MethodPost, loadGenAPIURL+"/reset", nil)
+	if err != nil {
+		t.Fatalf("failed to build reset request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed to reset load generator: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reset failed with status %s", resp.Status)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if getLoadGenStatus(t) == "idle" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("load generator did not become idle after reset")
+}
+
+func getLoadGenStatus(t *testing.T) string {
+	t.Helper()
+
+	resp, err := http.Get(loadGenAPIURL + "/status")
+	if err != nil {
+		t.Fatalf("failed to read load generator status: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("failed to decode load generator status: %v", err)
+	}
+	return status.Status
+}
+
+func waitForLoadGenTerminal(t *testing.T, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status := getLoadGenStatus(t)
+		if status == "idle" || status == "completed" || status == "error" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("load generator did not reach terminal state within %v", timeout)
+}
+
+func fetchLatestTestID(t *testing.T) string {
+	t.Helper()
+
+	resp, err := http.Get(loadGenAPIURL + "/history?limit=1&offset=0")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var result struct {
+		Runs []struct {
+			ID string `json:"id"`
+		} `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	if len(result.Runs) == 0 {
+		return ""
+	}
+	return result.Runs[0].ID
+}
+
+func waitForNewLatestTestID(t *testing.T, prevLatest string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		latest := fetchLatestTestID(t)
+		if latest != "" && latest != prevLatest {
+			return latest
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Fatalf("did not observe a new test id in history within %v", timeout)
+	return ""
 }
 
 func waitForTestCompletion(t *testing.T, testID string, timeout time.Duration) {
@@ -423,7 +545,7 @@ func fetchAllTxLogs(t *testing.T, testID string) []txLogEntry {
 	limit := 1000
 
 	for {
-		url := fmt.Sprintf("%s/api/history/%s/transactions?limit=%d&offset=%d",
+		url := fmt.Sprintf("%s/history/%s/transactions?limit=%d&offset=%d",
 			loadGenAPIURL, testID, limit, offset)
 
 		resp, err := http.Get(url)
