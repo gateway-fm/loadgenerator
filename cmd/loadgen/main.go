@@ -1633,7 +1633,12 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 	}
 
 	// Batch configuration
+	// maxBatchLinger prevents the "synchronized burst" problem: when many workers
+	// share a rate limiter, each worker takes N seconds to fill a batch of 20,
+	// then ALL workers flush simultaneously creating massive TX bursts.
+	// With a linger timeout, partial batches flush quickly, spreading load evenly.
 	const batchSize = 20
+	const maxBatchLinger = 100 * time.Millisecond
 	batchData := make([][]byte, 0, batchSize)
 	batchCallbacks := make([]func(error), 0, batchSize)
 	// We need to track nonces to rollback on failure
@@ -1648,7 +1653,8 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			return
 		}
 
-		// Fill the batch
+		// Fill the batch (with linger deadline to flush partial batches quickly)
+		var batchDeadline time.Time
 		for len(batchData) < batchSize {
 			if lg.ctx.Err() != nil || lg.shouldStop() {
 				break
@@ -1717,9 +1723,36 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 
 			// Wait for rate limiter permit AFTER build+sign+encode succeeds.
 			// This prevents build failures from wasting rate tokens.
-			if err := lg.rateLimiter.Wait(lg.ctx); err != nil {
-				n.Rollback()
-				return // context cancelled
+			// Use linger-aware context when batch already has items to prevent
+			// all workers from accumulating for seconds before flushing.
+			var waitErr error
+			if len(batchData) > 0 && !batchDeadline.IsZero() {
+				remaining := time.Until(batchDeadline)
+				if remaining <= 0 {
+					n.Rollback()
+					break // Linger expired - flush partial batch
+				}
+				lingerCtx, lingerCancel := context.WithTimeout(lg.ctx, remaining)
+				waitErr = lg.rateLimiter.Wait(lingerCtx)
+				lingerCancel()
+				if waitErr != nil {
+					n.Rollback()
+					if lg.ctx.Err() != nil {
+						return // Real context cancellation
+					}
+					break // Linger timeout - flush partial batch
+				}
+			} else {
+				waitErr = lg.rateLimiter.Wait(lg.ctx)
+				if waitErr != nil {
+					n.Rollback()
+					return // context cancelled
+				}
+			}
+
+			// Set batch deadline after first TX is added
+			if len(batchData) == 0 {
+				batchDeadline = time.Now().Add(maxBatchLinger)
 			}
 
 			// Record metrics for realistic/adaptive-realistic mode

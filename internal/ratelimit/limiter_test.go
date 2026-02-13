@@ -83,6 +83,45 @@ func TestLimiterWaitCancellation(t *testing.T) {
 	}
 }
 
+func TestLimiterCancelledWaitReturnsPermit(t *testing.T) {
+	// Regression test: cancelled Wait() calls must return their permit slot
+	// so that subsequent callers aren't starved. This was the root cause of
+	// the "request 100 TPS, get 50 TPS" bug — the batch linger timeout in
+	// senderWorker cancelled Wait() calls that had already consumed a slot.
+	rate := 100.0 // 100/s = 10ms interval
+	l := New(rate)
+
+	// Consume first permit (immediate)
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cancel the next 10 Wait() calls via short timeout — these should
+	// return their permits so they don't consume rate limiter capacity.
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+		_ = l.Wait(ctx)
+		cancel()
+	}
+
+	// Now issue 9 more permits (10 total including the first).
+	// If cancelled Waits leaked slots, this would take ~200ms (20 intervals).
+	// With the fix, it should take ~90ms (9 intervals at 10ms each).
+	start := time.Now()
+	for i := 0; i < 9; i++ {
+		if err := l.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elapsed := time.Since(start)
+
+	// 9 permits at 100/s = 90ms expected. Allow generous tolerance but
+	// it must be well under 200ms (which would indicate leaked slots).
+	if elapsed > 150*time.Millisecond {
+		t.Errorf("cancelled Waits leaked permit slots: 9 permits took %v (expected ~90ms)", elapsed)
+	}
+}
+
 func TestLimiterSmoothness(t *testing.T) {
 	// Test that permits are issued at correct intervals
 	rate := 100.0 // 100 per second = 10ms per permit
