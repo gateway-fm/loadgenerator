@@ -116,6 +116,7 @@ var _ metrics.Collector = (*mockMetrics)(nil)
 
 func (m *mockMetrics) RecordTxSent(common.Hash, time.Time)                 {}
 func (m *mockMetrics) RecordTxConfirmed(common.Hash, time.Time)            {}
+func (m *mockMetrics) RecordTxConfirmedFlowOnly(common.Hash, time.Time)    {}
 func (m *mockMetrics) RecordTxFailed(string)                               { atomic.AddInt32(&m.txFailed, 1) }
 func (m *mockMetrics) RecordPending(common.Hash, time.Time)                {}
 func (m *mockMetrics) RecordPreconfirmed(common.Hash, time.Time)           {}

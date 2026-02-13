@@ -1129,6 +1129,9 @@ func (lg *LoadGenerator) Reset() {
 	atomic.StoreUint64(&lg.lastPreconfSeqNum, 0)
 	atomic.StoreUint64(&lg.preconfGaps, 0)
 	lg.discardedCount = 0
+	lg.startTime = time.Time{}
+	lg.currentDuration = 0
+	lg.currentTPS = 0
 
 	// Clear warnings
 	lg.warningsMu.Lock()
@@ -2731,21 +2734,38 @@ func (lg *LoadGenerator) processPreconfEvent(event *types.PreconfEvent) {
 		lg.recordTxPreconfirmed(txHash, now)
 
 	case types.PreconfStageConfirmed:
-		// Record confirmation - RecordTxConfirmed handles the case where txHash isn't found
-		lg.metricsCol.RecordTxConfirmed(txHash, now)
+		// Check if this confirmation is beyond the test end block (grace period arrival).
+		// testEndBlockNumber is protected by blockMetricsMu; read it once under the lock.
+		lg.blockMetricsMu.Lock()
+		endBlock := lg.testEndBlockNumber
+		lg.blockMetricsMu.Unlock()
+		beyondTestEnd := endBlock > 0 && event.BlockNumber > endBlock
+
+		if beyondTestEnd {
+			// Block is beyond on-chain verification range. Record the flow stage
+			// to keep TxFlowTracker accurate and prevent memory leaks, but don't
+			// inflate the confirmed counter or record latency stats.
+			lg.metricsCol.RecordTxConfirmedFlowOnly(txHash, now)
+		} else {
+			// Normal path: record full confirmation (counter + latency + flow)
+			lg.metricsCol.RecordTxConfirmed(txHash, now)
+		}
 		metrics.AtomicSubSaturating(&lg.pendingCount, 1)
 		// Record confirmation in TX log (non-blocking)
 		lg.recordTxConfirmed(txHash, now)
 		// Track recent confirmed TX for incremental verification (keep last 1000)
-		lg.recentConfirmedMu.Lock()
-		lg.recentConfirmedHashes = append(lg.recentConfirmedHashes, event.TxHash)
-		currentCount := len(lg.recentConfirmedHashes)
-		if currentCount > 1000 {
-			lg.recentConfirmedHashes = lg.recentConfirmedHashes[currentCount-1000:]
+		// Skip for blocks beyond test end since verification won't cover them.
+		if !beyondTestEnd {
+			lg.recentConfirmedMu.Lock()
+			lg.recentConfirmedHashes = append(lg.recentConfirmedHashes, event.TxHash)
+			currentCount := len(lg.recentConfirmedHashes)
+			if currentCount > 1000 {
+				lg.recentConfirmedHashes = lg.recentConfirmedHashes[currentCount-1000:]
+			}
+			lg.recentConfirmedMu.Unlock()
 		}
-		lg.recentConfirmedMu.Unlock()
 		// Track block number from confirmation event (fallback when L2 WebSocket unavailable)
-		if event.BlockNumber > 0 {
+		if event.BlockNumber > 0 && !beyondTestEnd {
 			lg.recentBlockNumbersMu.Lock()
 			// Only append if this is a new block number (avoid duplicates from batched events)
 			blockCount := len(lg.recentBlockNumbers)
