@@ -12,6 +12,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,10 +116,10 @@ type LoadGenerator struct {
 	currentTPS      float64
 
 	// Rate control
-	currentRate    int64  // atomic
-	peakRate       int64  // atomic
-	pendingCount   int64  // atomic
-	discardedCount uint64 // set at test end - transactions still pending that were discarded
+	currentRate    int64              // atomic
+	peakRate       int64              // atomic
+	pendingCount   int64              // atomic
+	discardedCount uint64             // set at test end - transactions still pending that were discarded
 	rateLimiter    *ratelimit.Limiter // Token bucket rate limiter for smooth traffic
 
 	// EIP-1559 gas pricing (set at test start)
@@ -137,8 +138,13 @@ type LoadGenerator struct {
 	latestBaseFeeGwei  float64 // latest block's baseFeePerGas in gwei
 	latestGasPriceGwei float64 // latest eth_gasPrice from L2 node in gwei
 	latestGasUsed      uint64  // latest block's gasUsed
-	builderPressureMu  sync.RWMutex
-	nonceResyncNeeded  int32 // atomic - 1 if nonces need resync after recovery
+	// HSM / block attestation state from builder /status
+	blockAttestationEnabled bool
+	hsmProvider             string
+	hsmKeyIDActive          string
+	hsmFailoverEnabled      bool
+	builderPressureMu       sync.RWMutex
+	nonceResyncNeeded       int32 // atomic - 1 if nonces need resync after recovery
 
 	// Preconfirmation WebSocket
 	preconfWsConn   *websocket.Conn
@@ -1123,6 +1129,9 @@ func (lg *LoadGenerator) Reset() {
 	atomic.StoreUint64(&lg.lastPreconfSeqNum, 0)
 	atomic.StoreUint64(&lg.preconfGaps, 0)
 	lg.discardedCount = 0
+	lg.startTime = time.Time{}
+	lg.currentDuration = 0
+	lg.currentTPS = 0
 
 	// Clear warnings
 	lg.warningsMu.Lock()
@@ -1219,6 +1228,10 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 	latestBaseFeeGwei := lg.latestBaseFeeGwei
 	latestGasPriceGwei := lg.latestGasPriceGwei
 	latestGasUsed := lg.latestGasUsed
+	blockAttestationEnabled := lg.blockAttestationEnabled
+	hsmProvider := lg.hsmProvider
+	hsmKeyIDActive := lg.hsmKeyIDActive
+	hsmFailoverEnabled := lg.hsmFailoverEnabled
 	lg.builderPressureMu.RUnlock()
 
 	// Get aggregate block metrics
@@ -1302,6 +1315,11 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		// Current rolling metrics (for live chart - sampled at 200ms)
 		CurrentMgasPerSec: currentMgasPerSec,
 		CurrentFillRate:   currentFillRate,
+		// HSM / block attestation metadata (if provided by builder status)
+		BlockAttestationEnabled: blockAttestationEnabled,
+		HSMProvider:             hsmProvider,
+		HSMKeyIDActive:          hsmKeyIDActive,
+		HSMFailoverEnabled:      hsmFailoverEnabled,
 	}
 
 	// Include TX flow stats if available
@@ -1617,6 +1635,18 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		}
 	}
 
+	// Batch configuration
+	// maxBatchLinger prevents the "synchronized burst" problem: when many workers
+	// share a rate limiter, each worker takes N seconds to fill a batch of 20,
+	// then ALL workers flush simultaneously creating massive TX bursts.
+	// With a linger timeout, partial batches flush quickly, spreading load evenly.
+	const batchSize = 20
+	const maxBatchLinger = 100 * time.Millisecond
+	batchData := make([][]byte, 0, batchSize)
+	batchCallbacks := make([]func(error), 0, batchSize)
+	// We need to track nonces to rollback on failure
+	batchNonces := make([]*account.Nonce, 0, batchSize)
+
 	for {
 		// Check context/stop FIRST to prevent busy-looping when shutting down
 		if lg.ctx.Err() != nil {
@@ -1626,120 +1656,171 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			return
 		}
 
-		// Reserve nonce - will auto-rollback if not committed
-		n := acc.ReserveNonce()
+		// Fill the batch (with linger deadline to flush partial batches quickly)
+		var batchDeadline time.Time
+		for len(batchData) < batchSize {
+			if lg.ctx.Err() != nil || lg.shouldStop() {
+				break
+			}
 
-		// Select tx type and tip for this transaction
-		var builder txbuilder.Builder
-		var tipWei *big.Int
-		var txType types.TransactionType
+			// Reserve nonce - will auto-rollback if not committed
+			n := acc.ReserveNonce()
 
-		if useRealisticTxGen && realisticCfg != nil {
-			// Realistic/adaptive-realistic mode: random tx type and tip
-			txType = selectRandomTxType(realisticCfg.TxTypeRatios, rnd)
-			tipWei = generateRandomTip(realisticCfg, rnd)
+			// Select tx type and tip for this transaction
+			var builder txbuilder.Builder
+			var tipWei *big.Int
+			var txType types.TransactionType
 
-			var err error
-			builder, err = lg.txBuilderReg.Get(txType)
+			if useRealisticTxGen && realisticCfg != nil {
+				// Realistic/adaptive-realistic mode: random tx type and tip
+				txType = selectRandomTxType(realisticCfg.TxTypeRatios, rnd)
+				tipWei = generateRandomTip(realisticCfg, rnd)
+
+				var err error
+				builder, err = lg.txBuilderReg.Get(txType)
+				if err != nil {
+					lg.logger.Error("failed to get tx builder for type", "type", txType, "error", err)
+					n.Rollback()
+					continue
+				}
+			} else {
+				// Standard mode: fixed tx type and tip
+				builder = defaultBuilder
+				tipWei = lg.gasTipCap
+				txType = lg.currentTxType
+			}
+
+			// Calculate gas fee cap based on tip
+			gasFeeCap := new(big.Int).Add(tipWei, lg.gasFeeCap)
+
+			// Build transaction (EIP-1559 or legacy depending on execution layer)
+			tx, err := builder.Build(txbuilder.TxParams{
+				ChainID:   chainID,
+				Nonce:     n.Value(),
+				GasTipCap: tipWei,
+				GasFeeCap: gasFeeCap,
+				From:      acc.Address,
+				UseLegacy: lg.cfg.Capabilities != nil && lg.cfg.Capabilities.RequiresLegacyTx,
+			})
 			if err != nil {
-				lg.logger.Error("failed to get tx builder for type", "type", txType, "error", err)
+				lg.logger.Error("failed to build tx", "error", err)
 				n.Rollback()
 				continue
 			}
-		} else {
-			// Standard mode: fixed tx type and tip
-			builder = defaultBuilder
-			tipWei = lg.gasTipCap
-			txType = lg.currentTxType
-		}
 
-		// Calculate gas fee cap based on tip
-		gasFeeCap := new(big.Int).Add(tipWei, lg.gasFeeCap)
-
-		// Build transaction (EIP-1559 or legacy depending on execution layer)
-		tx, err := builder.Build(txbuilder.TxParams{
-			ChainID:   chainID,
-			Nonce:     n.Value(),
-			GasTipCap: tipWei,
-			GasFeeCap: gasFeeCap,
-			From:      acc.Address,
-			UseLegacy: lg.cfg.Capabilities != nil && lg.cfg.Capabilities.RequiresLegacyTx,
-		})
-		if err != nil {
-			lg.logger.Error("failed to build tx", "error", err)
-			n.Rollback()
-			continue
-		}
-
-		// Sign transaction
-		signedTx, err := ethtypes.SignTx(tx, signer, acc.PrivateKey)
-		if err != nil {
-			lg.logger.Error("failed to sign tx", "error", err)
-			n.Rollback()
-			continue
-		}
-
-		// Encode transaction
-		txData, err := signedTx.MarshalBinary()
-		if err != nil {
-			lg.logger.Error("failed to encode tx", "error", err)
-			n.Rollback()
-			continue
-		}
-
-		// Wait for rate limiter permit AFTER build+sign+encode succeeds.
-		// This prevents build failures (e.g. "Uniswap V3 contracts not deployed")
-		// from wasting rate tokens and creating artificial backpressure.
-		if err := lg.rateLimiter.Wait(lg.ctx); err != nil {
-			n.Rollback()
-			return // context cancelled
-		}
-
-		// Record metrics for realistic/adaptive-realistic mode
-		if useRealisticTxGen && realisticCfg != nil {
-			lg.metricsCol.RecordTipWithConfig(tipWei, realisticCfg.MinTipGwei, realisticCfg.MaxTipGwei)
-			lg.metricsCol.RecordTxType(txType, tipWei, true) // Mark as sent (success tracked later)
-		}
-
-		// Queue for async send
-		txHash := signedTx.Hash()
-		sentTime := time.Now()
-		nonce := n // Capture for closure
-
-		queued := lg.sender.SendAsync(lg.ctx, txData, func(sendErr error) {
-			if sendErr != nil {
-				nonce.Rollback()
-				lg.metricsCol.RecordTxFailed("send")
-				metrics.AtomicSubSaturating(&lg.pendingCount, 1)
-				atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
-				lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
-			} else {
-				nonce.Commit()
+			// Sign transaction
+			signedTx, err := ethtypes.SignTx(tx, signer, acc.PrivateKey)
+			if err != nil {
+				lg.logger.Error("failed to sign tx", "error", err)
+				n.Rollback()
+				continue
 			}
-		})
 
-		if !queued {
-			// Sender at capacity - rollback and retry immediately.
-			// No sleep needed - limiter already paced us, and the sender
-			// backpressure will naturally throttle.
-			n.Rollback()
-			lg.logger.Debug("sender at capacity, retrying", "account", id)
-			continue
+			// Encode transaction
+			txData, err := signedTx.MarshalBinary()
+			if err != nil {
+				lg.logger.Error("failed to encode tx", "error", err)
+				n.Rollback()
+				continue
+			}
+
+			// Wait for rate limiter permit AFTER build+sign+encode succeeds.
+			// This prevents build failures from wasting rate tokens.
+			// Use linger-aware context when batch already has items to prevent
+			// all workers from accumulating for seconds before flushing.
+			var waitErr error
+			if len(batchData) > 0 && !batchDeadline.IsZero() {
+				remaining := time.Until(batchDeadline)
+				if remaining <= 0 {
+					n.Rollback()
+					break // Linger expired - flush partial batch
+				}
+				lingerCtx, lingerCancel := context.WithTimeout(lg.ctx, remaining)
+				waitErr = lg.rateLimiter.Wait(lingerCtx)
+				lingerCancel()
+				if waitErr != nil {
+					n.Rollback()
+					if lg.ctx.Err() != nil {
+						return // Real context cancellation
+					}
+					break // Linger timeout - flush partial batch
+				}
+			} else {
+				waitErr = lg.rateLimiter.Wait(lg.ctx)
+				if waitErr != nil {
+					n.Rollback()
+					return // context cancelled
+				}
+			}
+
+			// Set batch deadline after first TX is added
+			if len(batchData) == 0 {
+				batchDeadline = time.Now().Add(maxBatchLinger)
+			}
+
+			// Record metrics for realistic/adaptive-realistic mode
+			if useRealisticTxGen && realisticCfg != nil {
+				lg.metricsCol.RecordTipWithConfig(tipWei, realisticCfg.MinTipGwei, realisticCfg.MaxTipGwei)
+				lg.metricsCol.RecordTxType(txType, tipWei, true) // Mark as sent (success tracked later)
+			}
+
+			// Add to batch
+			txHash := signedTx.Hash()
+			sentTime := time.Now()
+
+			batchData = append(batchData, txData)
+			batchNonces = append(batchNonces, n)
+
+			// Capture values for callback closure
+			// Note: n is captured by value/copy in batchNonces, but we need closure for callback
+			nonceVal := n
+
+			callback := func(sendErr error) {
+				if sendErr != nil {
+					nonceVal.Rollback()
+					lg.metricsCol.RecordTxFailed("send")
+					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+					atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
+					lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
+				} else {
+					nonceVal.Commit()
+				}
+			}
+			batchCallbacks = append(batchCallbacks, callback)
+
+			// Record stats immediately (assuming send will likely succeed or be tracked via callback)
+			lg.metricsCol.RecordTxSent(txHash, sentTime)
+			lg.metricsCol.IncTxSent()
+			atomic.AddInt64(&lg.pendingCount, 1)
+			atomic.AddInt64(&lg.recentSends, 1) // Circuit breaker tracking
+
+			// Record TX log (non-blocking)
+			tipGwei := float64(tipWei.Int64()) / 1e9
+			lg.recordTxSent(txHash, sentTime, id, n.Value(), tipGwei)
 		}
 
-		// TX queued successfully - nonce commit/rollback handled in callback
-		// DO NOT commit here - the async callback will commit on success or rollback on failure
-		lg.metricsCol.RecordTxSent(txHash, sentTime)
-		lg.metricsCol.IncTxSent()
-		atomic.AddInt64(&lg.pendingCount, 1)
-		atomic.AddInt64(&lg.recentSends, 1) // Circuit breaker tracking
+		if len(batchData) > 0 {
+			// Send the batch
+			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, batchCallbacks)
 
-		// Record TX log (non-blocking)
-		tipGwei := float64(tipWei.Int64()) / 1e9
-		lg.recordTxSent(txHash, sentTime, id, n.Value(), tipGwei)
+			if !queued {
+				// Sender at capacity - rollback ALL nonces in the batch and retry loop
+				// We drop this batch to fallback to simple retry logic, or we could spin loop
+				// But dropping/rolling back is safer to avoid stale nonces if we get stuck
+				lg.logger.Debug("sender at capacity, dropping batch", "size", len(batchData))
+				for _, n := range batchNonces {
+					n.Rollback()
+					// Revert stats optimization
+					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+					// We don't revert IncTxSent/RecordTxSent easily, but that's acceptable for metrics noise
+				}
+			}
 
-		// No sleep at end of cycle - the rate limiter at the top of the loop
-		// handles all pacing, ensuring smooth traffic generation.
+			// Reset batch buffers (keep capacity)
+			batchData = batchData[:0]
+			batchCallbacks = batchCallbacks[:0]
+			batchNonces = batchNonces[:0]
+		}
 	}
 }
 
@@ -2174,6 +2255,11 @@ func (lg *LoadGenerator) fetchBuilderPressure() {
 		PendingPoolSize   int64   `json:"pendingPoolSize"`
 		LatestBaseFeeGwei float64 `json:"latestBaseFeeGwei"`
 		LatestGasUsed     uint64  `json:"latestGasUsed"`
+		// HSM / block attestation metadata (optional)
+		BlockAttestationEnabled bool   `json:"blockAttestationEnabled"`
+		HSMProvider             string `json:"hsmProvider"`
+		HSMKeyIDActive          string `json:"hsmKeyIdActive"`
+		HSMFailoverEnabled      bool   `json:"hsmFailoverEnabled"`
 	}
 
 	if err := stdjson.NewDecoder(resp.Body).Decode(&status); err != nil {
@@ -2215,6 +2301,10 @@ func (lg *LoadGenerator) fetchBuilderPressure() {
 	lg.latestBaseFeeGwei = baseFeeGwei
 	lg.latestGasPriceGwei = gasPriceGwei
 	lg.latestGasUsed = status.LatestGasUsed
+	lg.blockAttestationEnabled = status.BlockAttestationEnabled
+	lg.hsmProvider = status.HSMProvider
+	lg.hsmKeyIDActive = status.HSMKeyIDActive
+	lg.hsmFailoverEnabled = status.HSMFailoverEnabled
 	lg.builderPressureMu.Unlock()
 }
 
@@ -2275,6 +2365,11 @@ func (lg *LoadGenerator) fetchBuilderConfig() *storage.EnvironmentSnapshot {
 		EnablePreconfirmations bool   `json:"enablePreconfirmations"`
 		SkipEmptyBlocks        bool   `json:"skipEmptyBlocks"`
 		IncludeDepositTx       bool   `json:"includeDepositTx"`
+		// HSM / block attestation metadata (optional)
+		BlockAttestationEnabled bool   `json:"blockAttestationEnabled"`
+		HSMProvider             string `json:"hsmProvider"`
+		HSMKeyIDActive          string `json:"hsmKeyIdActive"`
+		HSMFailoverEnabled      bool   `json:"hsmFailoverEnabled"`
 	}
 
 	if err := stdjson.NewDecoder(resp.Body).Decode(&builderStatus); err != nil {
@@ -2294,8 +2389,122 @@ func (lg *LoadGenerator) fetchBuilderConfig() *storage.EnvironmentSnapshot {
 	env.BuilderEnablePreconfs = builderStatus.EnablePreconfirmations
 	env.BuilderSkipEmptyBlocks = builderStatus.SkipEmptyBlocks
 	env.BuilderIncludeDepositTx = builderStatus.IncludeDepositTx
+	env.BuilderBlockAttestationEnabled = builderStatus.BlockAttestationEnabled
+	env.BuilderHSMProvider = builderStatus.HSMProvider
+	env.BuilderHSMKeyIDActive = builderStatus.HSMKeyIDActive
+	env.BuilderHSMFailoverEnabled = builderStatus.HSMFailoverEnabled
 
 	return env
+}
+
+type builderHeaderAttestationResponse struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Status        string `json:"status"`
+	Domain        struct {
+		ChainID uint64 `json:"chainId"`
+	} `json:"domain"`
+	Commitment struct {
+		BlockHash        string `json:"blockHash"`
+		ParentHash       string `json:"parentHash"`
+		StateRoot        string `json:"stateRoot"`
+		ReceiptsRoot     string `json:"receiptsRoot"`
+		BlockNumber      uint64 `json:"blockNumber"`
+		Timestamp        uint64 `json:"timestamp"`
+		GasUsed          uint64 `json:"gasUsed"`
+		BaseFeePerGasWei any    `json:"baseFeePerGasWei"`
+		SequencerAddress string `json:"sequencerAddress"`
+	} `json:"commitment"`
+	DigestHex    string    `json:"digestHex"`
+	SignatureHex string    `json:"signatureHex"`
+	RHex         string    `json:"rHex"`
+	SHex         string    `json:"sHex"`
+	V            uint8     `json:"v"`
+	KeyID        string    `json:"keyId"`
+	Provider     string    `json:"provider"`
+	Failover     bool      `json:"failover"`
+	Error        string    `json:"error"`
+	SignedAt     time.Time `json:"signedAt"`
+}
+
+// fetchHeaderAttestations retrieves signed header attestations for the test block range.
+func (lg *LoadGenerator) fetchHeaderAttestations(ctx context.Context, firstBlock, lastBlock uint64) []storage.HeaderAttestation {
+	if firstBlock == 0 || lastBlock == 0 || lastBlock < firstBlock {
+		return nil
+	}
+	if !lg.cfg.Capabilities.SupportsBuilderStatusAPI {
+		return nil
+	}
+
+	result := make([]storage.HeaderAttestation, 0, int(lastBlock-firstBlock+1))
+	client := &http.Client{Timeout: 1200 * time.Millisecond}
+
+	for blockNum := firstBlock; blockNum <= lastBlock; blockNum++ {
+		select {
+		case <-ctx.Done():
+			return result
+		default:
+		}
+
+		reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+		url := lg.cfg.BuilderRPCURL + "/block-attestations/" + strconv.FormatUint(blockNum, 10)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			continue
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			cancel()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			cancel()
+			continue
+		}
+
+		var payload builderHeaderAttestationResponse
+		if err := stdjson.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			cancel()
+			continue
+		}
+		resp.Body.Close()
+		cancel()
+
+		result = append(result, storage.HeaderAttestation{
+			SchemaVersion: payload.SchemaVersion,
+			Status:        payload.Status,
+			BlockNumber:   payload.Commitment.BlockNumber,
+			BlockHash:     payload.Commitment.BlockHash,
+			ParentHash:    payload.Commitment.ParentHash,
+			StateRoot:     payload.Commitment.StateRoot,
+			ReceiptsRoot:  payload.Commitment.ReceiptsRoot,
+			Timestamp:     payload.Commitment.Timestamp,
+			GasUsed:       payload.Commitment.GasUsed,
+			BaseFeeWei:    fmt.Sprint(payload.Commitment.BaseFeePerGasWei),
+			Sequencer:     payload.Commitment.SequencerAddress,
+			DigestHex:     payload.DigestHex,
+			SignatureHex:  payload.SignatureHex,
+			RHex:          payload.RHex,
+			SHex:          payload.SHex,
+			V:             payload.V,
+			KeyID:         payload.KeyID,
+			Provider:      payload.Provider,
+			Failover:      payload.Failover,
+			Error:         payload.Error,
+			SignedAt:      payload.SignedAt,
+		})
+	}
+
+	return result
 }
 
 // fetchNodeInfo fetches node version and chain ID from L2 RPC.
@@ -2525,21 +2734,38 @@ func (lg *LoadGenerator) processPreconfEvent(event *types.PreconfEvent) {
 		lg.recordTxPreconfirmed(txHash, now)
 
 	case types.PreconfStageConfirmed:
-		// Record confirmation - RecordTxConfirmed handles the case where txHash isn't found
-		lg.metricsCol.RecordTxConfirmed(txHash, now)
+		// Check if this confirmation is beyond the test end block (grace period arrival).
+		// testEndBlockNumber is protected by blockMetricsMu; read it once under the lock.
+		lg.blockMetricsMu.Lock()
+		endBlock := lg.testEndBlockNumber
+		lg.blockMetricsMu.Unlock()
+		beyondTestEnd := endBlock > 0 && event.BlockNumber > endBlock
+
+		if beyondTestEnd {
+			// Block is beyond on-chain verification range. Record the flow stage
+			// to keep TxFlowTracker accurate and prevent memory leaks, but don't
+			// inflate the confirmed counter or record latency stats.
+			lg.metricsCol.RecordTxConfirmedFlowOnly(txHash, now)
+		} else {
+			// Normal path: record full confirmation (counter + latency + flow)
+			lg.metricsCol.RecordTxConfirmed(txHash, now)
+		}
 		metrics.AtomicSubSaturating(&lg.pendingCount, 1)
 		// Record confirmation in TX log (non-blocking)
 		lg.recordTxConfirmed(txHash, now)
 		// Track recent confirmed TX for incremental verification (keep last 1000)
-		lg.recentConfirmedMu.Lock()
-		lg.recentConfirmedHashes = append(lg.recentConfirmedHashes, event.TxHash)
-		currentCount := len(lg.recentConfirmedHashes)
-		if currentCount > 1000 {
-			lg.recentConfirmedHashes = lg.recentConfirmedHashes[currentCount-1000:]
+		// Skip for blocks beyond test end since verification won't cover them.
+		if !beyondTestEnd {
+			lg.recentConfirmedMu.Lock()
+			lg.recentConfirmedHashes = append(lg.recentConfirmedHashes, event.TxHash)
+			currentCount := len(lg.recentConfirmedHashes)
+			if currentCount > 1000 {
+				lg.recentConfirmedHashes = lg.recentConfirmedHashes[currentCount-1000:]
+			}
+			lg.recentConfirmedMu.Unlock()
 		}
-		lg.recentConfirmedMu.Unlock()
 		// Track block number from confirmation event (fallback when L2 WebSocket unavailable)
-		if event.BlockNumber > 0 {
+		if event.BlockNumber > 0 && !beyondTestEnd {
 			lg.recentBlockNumbersMu.Lock()
 			// Only append if this is a new block number (avoid duplicates from batched events)
 			blockCount := len(lg.recentBlockNumbers)
@@ -4165,6 +4391,21 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 				confirmedTxHashes,
 				progressCb,
 			)
+		}
+	}
+
+	// Fetch signed header attestations for the on-chain block range when HSM/attestation is enabled.
+	if verificationResult != nil &&
+		environment != nil &&
+		environment.BuilderBlockAttestationEnabled &&
+		onChainMetrics.firstBlock > 0 &&
+		onChainMetrics.lastBlock >= onChainMetrics.firstBlock {
+		expected := int(onChainMetrics.lastBlock - onChainMetrics.firstBlock + 1)
+		headerAttestations := lg.fetchHeaderAttestations(ctx, onChainMetrics.firstBlock, onChainMetrics.lastBlock)
+		if len(headerAttestations) > 0 {
+			verificationResult.HeaderAttestationExpected = expected
+			verificationResult.HeaderAttestationFound = len(headerAttestations)
+			verificationResult.HeaderAttestations = headerAttestations
 		}
 	}
 

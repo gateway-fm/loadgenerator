@@ -22,6 +22,7 @@ type Collector interface {
 	// Transaction lifecycle
 	RecordTxSent(txHash common.Hash, sentTime time.Time)
 	RecordTxConfirmed(txHash common.Hash, confirmTime time.Time)
+	RecordTxConfirmedFlowOnly(txHash common.Hash, confirmTime time.Time) // Flow tracking only (no counter/latency)
 	RecordTxFailed(category string)
 
 	// Preconfirmation lifecycle (Flashblocks-compliant)
@@ -150,6 +151,15 @@ func (c *MemoryCollector) RecordTxConfirmed(txHash common.Hash, confirmTime time
 	latencyMs := float64(confirmTime.Sub(sentTime).Milliseconds())
 	c.latencyStats.Add(latencyMs)
 	atomic.AddUint64(&c.txConfirmed, 1)
+	c.flowTracker.RecordStage(txHash, StageConfirmed, confirmTime)
+}
+
+// RecordTxConfirmedFlowOnly records the confirmed flow stage without incrementing
+// the confirmed counter or recording latency. Used for TXs confirmed in blocks
+// beyond the test end boundary (grace period arrivals) to keep the flow tracker
+// accurate and prevent memory leaks from unfinished flow entries.
+func (c *MemoryCollector) RecordTxConfirmedFlowOnly(txHash common.Hash, confirmTime time.Time) {
+	c.txTracker.GetAndDelete(txHash) // Clean up sent tracker
 	c.flowTracker.RecordStage(txHash, StageConfirmed, confirmTime)
 }
 

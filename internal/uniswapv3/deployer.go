@@ -320,11 +320,10 @@ func (d *Deployer) ProvisionLiquidity(ctx context.Context, deployer *account.Acc
 	}
 	nonce++
 
-	// 4. Approve NFTPositionManager to spend USDC - wait for confirmation
-	// This ensures all prior TXs are also confirmed (sequential nonces)
-	d.logger.Info("Approving USDC for NFTPositionManager (waiting for confirmation)...")
+	// 4. Approve NFTPositionManager to spend USDC - fire and forget (nonce ordering ensures execution order)
+	d.logger.Info("Approving USDC for NFTPositionManager...")
 	approveUSDC := EncodeApprove(contracts.NonfungiblePositionManager, MaxUint256)
-	if err := d.sendTxAndWaitForReceipt(ctx, deployer, contracts.USDC, approveUSDC, nil, nonce, "approveUSDC"); err != nil {
+	if err := d.sendTx(ctx, deployer, contracts.USDC, approveUSDC, nil, nonce); err != nil {
 		return fmt.Errorf("approve USDC for NFT position manager: %w", err)
 	}
 	nonce++

@@ -65,6 +65,12 @@ func (l *Limiter) Wait(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		// Return the unused permit — we reserved a slot (advanced nextPermitTime)
+		// but never reached our permit time, so give it back to avoid wasting
+		// rate limiter capacity when callers cancel (e.g. batch linger timeout).
+		l.mu.Lock()
+		l.nextPermitTime = l.nextPermitTime.Add(-l.interval)
+		l.mu.Unlock()
 		return ctx.Err()
 	case <-timer.C:
 		return nil

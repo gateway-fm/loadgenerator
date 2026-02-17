@@ -87,11 +87,11 @@ type AccountInfo struct {
 
 // TestAccountsInfo contains information about test accounts.
 type TestAccountsInfo struct {
-	TotalCount    int       `json:"totalCount"`    // Total accounts used (built-in + dynamic)
-	DynamicCount  int       `json:"dynamicCount"`  // Dynamically created accounts
-	FundedCount   int       `json:"fundedCount"`   // Successfully funded accounts
-	FunderAddress string    `json:"funderAddress"` // Address that funded the accounts (deployer)
-	Accounts      []string  `json:"accounts,omitempty"` // Legacy: Account addresses (limited to first 100)
+	TotalCount    int      `json:"totalCount"`         // Total accounts used (built-in + dynamic)
+	DynamicCount  int      `json:"dynamicCount"`       // Dynamically created accounts
+	FundedCount   int      `json:"fundedCount"`        // Successfully funded accounts
+	FunderAddress string   `json:"funderAddress"`      // Address that funded the accounts (deployer)
+	Accounts      []string `json:"accounts,omitempty"` // Legacy: Account addresses (limited to first 100)
 
 	// New: All accounts with roles
 	AllAccounts []AccountInfo `json:"allAccounts,omitempty"` // All accounts with their roles
@@ -108,6 +108,11 @@ type EnvironmentSnapshot struct {
 	BuilderEnablePreconfs   bool   `json:"builderEnablePreconfs"`
 	BuilderSkipEmptyBlocks  bool   `json:"builderSkipEmptyBlocks"`
 	BuilderIncludeDepositTx bool   `json:"builderIncludeDepositTx"` // Include L1 deposit TX in each block
+	// HSM / block attestation config
+	BuilderBlockAttestationEnabled bool   `json:"builderBlockAttestationEnabled"`
+	BuilderHSMProvider             string `json:"builderHsmProvider,omitempty"`
+	BuilderHSMKeyIDActive          string `json:"builderHsmKeyIdActive,omitempty"`
+	BuilderHSMFailoverEnabled      bool   `json:"builderHsmFailoverEnabled"`
 
 	// Load generator config
 	LoadGenGasTipCapGwei  float64 `json:"loadGenGasTipCapGwei"`
@@ -143,6 +148,36 @@ type VerificationResult struct {
 	IncrementalMode bool                              `json:"incrementalMode,omitempty"` // True if incremental verification was used
 	Snapshots       []IncrementalVerificationSnapshot `json:"snapshots,omitempty"`       // Periodic samples (limited to last 100)
 	SnapshotCount   int                               `json:"snapshotCount,omitempty"`   // Total snapshots taken during test
+
+	// Header attestation signatures (when block attestation / HSM is enabled)
+	HeaderAttestationExpected int                 `json:"headerAttestationExpected,omitempty"` // Expected headers in sampled block range
+	HeaderAttestationFound    int                 `json:"headerAttestationFound,omitempty"`    // Signatures successfully retrieved
+	HeaderAttestations        []HeaderAttestation `json:"headerAttestations,omitempty"`        // Per-header signature details
+}
+
+// HeaderAttestation represents a signed block-header attestation artifact.
+type HeaderAttestation struct {
+	SchemaVersion int       `json:"schemaVersion,omitempty"`
+	Status        string    `json:"status,omitempty"` // "signed" | "failed"
+	BlockNumber   uint64    `json:"blockNumber"`
+	BlockHash     string    `json:"blockHash,omitempty"`
+	ParentHash    string    `json:"parentHash,omitempty"`
+	StateRoot     string    `json:"stateRoot,omitempty"`
+	ReceiptsRoot  string    `json:"receiptsRoot,omitempty"`
+	Timestamp     uint64    `json:"timestamp,omitempty"`
+	GasUsed       uint64    `json:"gasUsed,omitempty"`
+	BaseFeeWei    string    `json:"baseFeeWei,omitempty"`
+	Sequencer     string    `json:"sequencer,omitempty"`
+	DigestHex     string    `json:"digestHex,omitempty"`
+	SignatureHex  string    `json:"signatureHex,omitempty"`
+	RHex          string    `json:"rHex,omitempty"`
+	SHex          string    `json:"sHex,omitempty"`
+	V             uint8     `json:"v,omitempty"`
+	KeyID         string    `json:"keyId,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	Failover      bool      `json:"failover,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	SignedAt      time.Time `json:"signedAt,omitempty"`
 }
 
 // TipOrderingResult contains tip ordering verification results.
@@ -181,8 +216,8 @@ type TxReceiptVerification struct {
 	MinGasUsed       uint64            `json:"minGasUsed"`
 	MaxGasUsed       uint64            `json:"maxGasUsed"`
 	TotalGasVerified uint64            `json:"totalGasVerified"`
-	Samples          []TxReceiptSample `json:"samples,omitempty"`      // First 10 samples for inspection
-	RevertedTxs      []TxReceiptSample `json:"revertedTxs,omitempty"`  // All reverted TXs (up to 100)
+	Samples          []TxReceiptSample `json:"samples,omitempty"`     // First 10 samples for inspection
+	RevertedTxs      []TxReceiptSample `json:"revertedTxs,omitempty"` // All reverted TXs (up to 100)
 }
 
 // TxReceiptSample represents a single sampled transaction receipt.
@@ -198,17 +233,17 @@ type TxReceiptSample struct {
 // These are aggregated at test end for the final VerificationResult.
 type IncrementalVerificationSnapshot struct {
 	Timestamp        time.Time         `json:"timestamp"`
-	FirstBlock       uint64            `json:"firstBlock"`       // First block in this sample window
-	LastBlock        uint64            `json:"lastBlock"`        // Last block in this sample window
-	BlocksSampled    int               `json:"blocksSampled"`    // Blocks checked for tip ordering
-	BlocksOrdered    int               `json:"blocksOrdered"`    // Blocks with correct tip ordering
+	FirstBlock       uint64            `json:"firstBlock"`    // First block in this sample window
+	LastBlock        uint64            `json:"lastBlock"`     // Last block in this sample window
+	BlocksSampled    int               `json:"blocksSampled"` // Blocks checked for tip ordering
+	BlocksOrdered    int               `json:"blocksOrdered"` // Blocks with correct tip ordering
 	ReceiptsSampled  int               `json:"receiptsSampled"`
 	ReceiptsSuccess  int               `json:"receiptsSuccess"`
 	ReceiptsReverted int               `json:"receiptsReverted"`
-	TotalGasUsed     uint64            `json:"totalGasUsed"`     // Gas used in sampled receipts
-	MinGasUsed       uint64            `json:"minGasUsed"`       // Min gas used in sampled receipts
-	MaxGasUsed       uint64            `json:"maxGasUsed"`       // Max gas used in sampled receipts
-	Violations       int               `json:"violations"`       // Tip ordering violations found
+	TotalGasUsed     uint64            `json:"totalGasUsed"`          // Gas used in sampled receipts
+	MinGasUsed       uint64            `json:"minGasUsed"`            // Min gas used in sampled receipts
+	MaxGasUsed       uint64            `json:"maxGasUsed"`            // Max gas used in sampled receipts
+	Violations       int               `json:"violations"`            // Tip ordering violations found
 	RevertedTxs      []TxReceiptSample `json:"revertedTxs,omitempty"` // Reverted TXs in this snapshot (up to 10)
 }
 
@@ -246,15 +281,15 @@ type TimeSeriesPoint struct {
 	TargetTPS    int     `json:"targetTps"`
 	PendingCount int64   `json:"pendingCount"`
 	// Block metrics (from L2 newHeads subscription)
-	GasUsed     uint64  `json:"gasUsed,omitempty"`     // Gas used in blocks during this period
-	GasLimit    uint64  `json:"gasLimit,omitempty"`    // Gas limit of blocks
-	BlockCount  int     `json:"blockCount,omitempty"`  // Number of blocks produced
-	MgasPerSec  float64 `json:"mgasPerSec,omitempty"`  // Calculated MGas/s
-	FillRate    float64 `json:"fillRate,omitempty"`    // Gas usage percentage (0-100)
+	GasUsed    uint64  `json:"gasUsed,omitempty"`    // Gas used in blocks during this period
+	GasLimit   uint64  `json:"gasLimit,omitempty"`   // Gas limit of blocks
+	BlockCount int     `json:"blockCount,omitempty"` // Number of blocks produced
+	MgasPerSec float64 `json:"mgasPerSec,omitempty"` // Calculated MGas/s
+	FillRate   float64 `json:"fillRate,omitempty"`   // Gas usage percentage (0-100)
 	// Block timing and gas pricing (for historical mode display)
-	AvgBlockTimeMs   float64 `json:"avgBlockTimeMs,omitempty"`   // Average block time in period (ms)
-	BaseFeeGwei      float64 `json:"baseFeeGwei,omitempty"`      // Latest base fee per gas (gwei)
-	GasPriceGwei     float64 `json:"gasPriceGwei,omitempty"`     // Latest gas price from eth_gasPrice (gwei)
+	AvgBlockTimeMs float64 `json:"avgBlockTimeMs,omitempty"` // Average block time in period (ms)
+	BaseFeeGwei    float64 `json:"baseFeeGwei,omitempty"`    // Latest base fee per gas (gwei)
+	GasPriceGwei   float64 `json:"gasPriceGwei,omitempty"`   // Latest gas price from eth_gasPrice (gwei)
 }
 
 // TxLogEntry represents a single transaction record.

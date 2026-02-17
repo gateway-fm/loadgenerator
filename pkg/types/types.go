@@ -166,14 +166,14 @@ type TestMetrics struct {
 	PeakTPS int `json:"peakTps,omitempty"`
 
 	// Initialization progress (shown during StatusInitializing)
-	InitPhase          InitPhase `json:"initPhase,omitempty"`          // Current initialization phase
-	InitProgress       string    `json:"initProgress,omitempty"`       // Human-readable progress message
-	AccountsTotal      int       `json:"accountsTotal,omitempty"`      // Total accounts needed
-	AccountsGenerated  int       `json:"accountsGenerated,omitempty"`  // Accounts generated so far
-	FundingTxsSent     int       `json:"fundingTxsSent,omitempty"`     // Funding TXs sent
-	FundingTxsTotal    int       `json:"fundingTxsTotal,omitempty"`    // Total funding TXs needed
-	ContractsDeployed  int       `json:"contractsDeployed,omitempty"`  // Contracts deployed
-	ContractsTotal     int       `json:"contractsTotal,omitempty"`     // Total contracts to deploy
+	InitPhase         InitPhase `json:"initPhase,omitempty"`         // Current initialization phase
+	InitProgress      string    `json:"initProgress,omitempty"`      // Human-readable progress message
+	AccountsTotal     int       `json:"accountsTotal,omitempty"`     // Total accounts needed
+	AccountsGenerated int       `json:"accountsGenerated,omitempty"` // Accounts generated so far
+	FundingTxsSent    int       `json:"fundingTxsSent,omitempty"`    // Funding TXs sent
+	FundingTxsTotal   int       `json:"fundingTxsTotal,omitempty"`   // Total funding TXs needed
+	ContractsDeployed int       `json:"contractsDeployed,omitempty"` // Contracts deployed
+	ContractsTotal    int       `json:"contractsTotal,omitempty"`    // Total contracts to deploy
 
 	// Verification progress (shown during StatusVerifying)
 	VerifyPhase      VerifyPhase `json:"verifyPhase,omitempty"`      // Current verification phase
@@ -219,6 +219,12 @@ type TestMetrics struct {
 	// Current rolling metrics (for live chart - sampled at 200ms)
 	CurrentMgasPerSec float64 `json:"currentMgasPerSec,omitempty"` // Rolling window MGas/s (for chart)
 	CurrentFillRate   float64 `json:"currentFillRate,omitempty"`   // Current block fill rate (for chart)
+
+	// HSM / block attestation metadata (optional)
+	BlockAttestationEnabled bool   `json:"blockAttestationEnabled"`
+	HSMProvider             string `json:"hsmProvider,omitempty"`
+	HSMKeyIDActive          string `json:"hsmKeyIdActive,omitempty"`
+	HSMFailoverEnabled      bool   `json:"hsmFailoverEnabled"`
 }
 
 // TestResult stores the final results of a completed test.
@@ -304,9 +310,9 @@ type PreconfBatchedEvent struct {
 // We first try to parse as batch (has "type" field), then fall back to single event.
 type PreconfMessage struct {
 	// Batch fields
-	Type        string          `json:"type,omitempty"`
-	Events      []*PreconfEvent `json:"events,omitempty"`
-	SeqNum      uint64          `json:"seqNum,omitempty"` // Sequence number for gap detection
+	Type   string          `json:"type,omitempty"`
+	Events []*PreconfEvent `json:"events,omitempty"`
+	SeqNum uint64          `json:"seqNum,omitempty"` // Sequence number for gap detection
 	// Single event fields
 	TxHash      string `json:"txHash,omitempty"`
 	Status      string `json:"status,omitempty"`
