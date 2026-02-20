@@ -6,7 +6,7 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache gcc musl-dev
+RUN apk upgrade --no-cache && apk add --no-cache gcc musl-dev
 
 # Copy go mod files
 COPY go.mod go.sum* ./
@@ -24,9 +24,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 
-RUN apk add --no-cache ca-certificates curl
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates curl
 
 WORKDIR /app
 
