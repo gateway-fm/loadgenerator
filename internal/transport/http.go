@@ -148,9 +148,10 @@ func validateStartRequest(req *types.StartTestRequest) error {
 			return fmt.Errorf("realisticConfig is required for realistic pattern")
 		}
 		cfg := req.RealisticConfig
-		if cfg.NumAccounts <= 0 {
-			return fmt.Errorf("realisticConfig.numAccounts must be positive, got %d", cfg.NumAccounts)
+		if cfg.NumAccounts < 0 {
+			return fmt.Errorf("realisticConfig.numAccounts cannot be negative, got %d", cfg.NumAccounts)
 		}
+		// NumAccounts == 0 is valid: triggers auto-calculation based on target TPS
 		if cfg.NumAccounts > maxAccounts {
 			return fmt.Errorf("realisticConfig.numAccounts exceeds maximum of %d", maxAccounts)
 		}

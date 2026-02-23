@@ -430,7 +430,7 @@ func TestValidateStartRequest_Realistic(t *testing.T) {
 			wantErr: "realisticConfig is required",
 		},
 		{
-			name: "zero numAccounts in realisticConfig",
+			name: "zero numAccounts triggers auto-calculation",
 			req: types.StartTestRequest{
 				Pattern:     types.PatternRealistic,
 				DurationSec: 60,
@@ -439,7 +439,19 @@ func TestValidateStartRequest_Realistic(t *testing.T) {
 					TargetTPS:   50,
 				},
 			},
-			wantErr: "realisticConfig.numAccounts must be positive",
+			wantErr: "", // 0 is valid: triggers auto-calculation
+		},
+		{
+			name: "negative numAccounts in realisticConfig",
+			req: types.StartTestRequest{
+				Pattern:     types.PatternRealistic,
+				DurationSec: 60,
+				RealisticConfig: &types.RealisticTestConfig{
+					NumAccounts: -1,
+					TargetTPS:   50,
+				},
+			},
+			wantErr: "realisticConfig.numAccounts cannot be negative",
 		},
 		{
 			name: "numAccounts exceeds max in realisticConfig",
