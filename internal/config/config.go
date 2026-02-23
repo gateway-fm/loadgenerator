@@ -4,6 +4,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -59,21 +60,25 @@ const (
 	DefaultBlockTimeMS         = 250        // 250ms default block time
 	DefaultCORSAllowedOrigins  = "*"        // Allow all origins by default for dev
 	AccountSafetyMargin        = 1.5        // 50% extra accounts for safety
+	TxsPerAccountPerBlock      = 30         // TXs each account can sustain per block (50 tested sustainable, 30 with safety buffer)
 	MinAccountsForAdaptive = 500        // Minimum accounts for "adaptive" pattern
 	MaxAccountsLimit       = 5000       // Maximum accounts to prevent resource exhaustion
+	MinAccounts            = 100        // Minimum accounts for any load test
 )
 
 // CalculateRequiredAccounts calculates the number of accounts needed for a given TPS.
-// Formula: accounts = targetTPS * blockTimeSec * safetyMargin
-// Each account can only submit 1 TX per block due to sequential nonces.
+// Formula: accounts = ceil(targetTPS * blockTimeSec / TxsPerAccountPerBlock * safetyMargin)
+// The block builder batches entire nonce chains per sender, so each account can handle
+// multiple TXs per block (TxsPerAccountPerBlock). This dramatically reduces the number
+// of accounts needed compared to a naive 1-TX-per-account-per-block assumption.
 func CalculateRequiredAccounts(targetTPS int, blockTimeMS int) int {
 	if blockTimeMS <= 0 {
 		blockTimeMS = DefaultBlockTimeMS
 	}
 	blockTimeSec := float64(blockTimeMS) / 1000.0
-	required := int(float64(targetTPS) * blockTimeSec * AccountSafetyMargin)
-	if required < 10 {
-		required = 10 // Minimum 10 accounts
+	required := int(math.Ceil(float64(targetTPS) * blockTimeSec / TxsPerAccountPerBlock * AccountSafetyMargin))
+	if required < MinAccounts {
+		required = MinAccounts
 	}
 	if required > MaxAccountsLimit {
 		required = MaxAccountsLimit
@@ -83,14 +88,14 @@ func CalculateRequiredAccounts(targetTPS int, blockTimeMS int) int {
 
 // EstimateMaxTPS estimates the maximum sustainable TPS for a given number of accounts.
 // This is the inverse of CalculateRequiredAccounts (without safety margin for realistic estimate).
-// Formula: maxTPS = accounts / blockTimeSec
+// Formula: maxTPS = accounts * TxsPerAccountPerBlock / blockTimeSec
 func EstimateMaxTPS(numAccounts int, blockTimeMS int) int {
 	if blockTimeMS <= 0 {
 		blockTimeMS = DefaultBlockTimeMS
 	}
 	blockTimeSec := float64(blockTimeMS) / 1000.0
 	// Don't apply safety margin here - give realistic estimate
-	maxTPS := int(float64(numAccounts) / blockTimeSec)
+	maxTPS := int(float64(numAccounts) * TxsPerAccountPerBlock / blockTimeSec)
 	if maxTPS < 1 {
 		maxTPS = 1
 	}

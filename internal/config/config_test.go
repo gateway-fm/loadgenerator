@@ -18,22 +18,29 @@ func TestCalculateRequiredAccounts(t *testing.T) {
 			name:        "low TPS with default block time",
 			targetTPS:   10,
 			blockTimeMS: DefaultBlockTimeMS, // 250ms
-			wantMin:     10,                 // minimum accounts
-			wantMax:     10,
+			wantMin:     MinAccounts,        // ceil(10*0.25/30*1.5)=1, clamped to min
+			wantMax:     MinAccounts,
 		},
 		{
 			name:        "100 TPS with 250ms blocks",
 			targetTPS:   100,
 			blockTimeMS: 250,
-			wantMin:     30, // 100 * 0.25 * 1.5 = 37.5, but reasonable range
-			wantMax:     50,
+			wantMin:     MinAccounts, // ceil(100*0.25/30*1.5)=2, clamped to min
+			wantMax:     MinAccounts,
 		},
 		{
 			name:        "1000 TPS with 1s blocks",
 			targetTPS:   1000,
 			blockTimeMS: 1000,
-			wantMin:     1400, // 1000 * 1.0 * 1.5 = 1500
-			wantMax:     1600,
+			wantMin:     MinAccounts, // ceil(1000/30*1.5)=50, clamped to min
+			wantMax:     MinAccounts,
+		},
+		{
+			name:        "10000 TPS with 1s blocks",
+			targetTPS:   10000,
+			blockTimeMS: 1000,
+			wantMin:     490, // ceil(10000/30*1.5)=500
+			wantMax:     510,
 		},
 		{
 			name:        "very high TPS capped at max",
@@ -46,15 +53,15 @@ func TestCalculateRequiredAccounts(t *testing.T) {
 			name:        "zero block time uses default",
 			targetTPS:   100,
 			blockTimeMS: 0,
-			wantMin:     30,
-			wantMax:     50,
+			wantMin:     MinAccounts, // clamped to min
+			wantMax:     MinAccounts,
 		},
 		{
 			name:        "negative block time uses default",
 			targetTPS:   100,
 			blockTimeMS: -100,
-			wantMin:     30,
-			wantMax:     50,
+			wantMin:     MinAccounts, // clamped to min
+			wantMax:     MinAccounts,
 		},
 	}
 
@@ -81,29 +88,29 @@ func TestEstimateMaxTPS(t *testing.T) {
 			name:        "10 accounts with 250ms blocks",
 			numAccounts: 10,
 			blockTimeMS: 250,
-			wantMin:     35, // 10 / 0.25 = 40
-			wantMax:     45,
+			wantMin:     1100, // 10 * 30 / 0.25 = 1200
+			wantMax:     1300,
 		},
 		{
 			name:        "100 accounts with 1s blocks",
 			numAccounts: 100,
 			blockTimeMS: 1000,
-			wantMin:     95,
-			wantMax:     105,
+			wantMin:     2900, // 100 * 30 / 1.0 = 3000
+			wantMax:     3100,
 		},
 		{
-			name:        "1 account minimum TPS",
+			name:        "1 account with 1s blocks",
 			numAccounts: 1,
 			blockTimeMS: 1000,
-			wantMin:     1,
-			wantMax:     1,
+			wantMin:     25, // 1 * 30 / 1.0 = 30
+			wantMax:     35,
 		},
 		{
 			name:        "zero block time uses default",
 			numAccounts: 100,
 			blockTimeMS: 0,
-			wantMin:     350, // 100 / 0.25 = 400
-			wantMax:     450,
+			wantMin:     11000, // 100 * 30 / 0.25 = 12000
+			wantMax:     13000,
 		},
 	}
 
