@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -15,28 +14,7 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true // Allow requests without Origin header (same-origin or direct)
-		}
-
-		// Parse the origin URL
-		originURL, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-
-		// Allow same origin (same host)
-		if originURL.Host == r.Host {
-			return true
-		}
-
-		// Allow localhost connections (common for development)
-		if originURL.Hostname() == "localhost" || originURL.Hostname() == "127.0.0.1" {
-			return true
-		}
-
-		return false
+		return true // Dev tool: allow all origins (matches HTTP CORS default "*")
 	},
 }
 
