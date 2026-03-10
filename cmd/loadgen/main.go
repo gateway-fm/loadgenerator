@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/big"
 	"net/http"
 	_ "net/http/pprof"
@@ -37,6 +36,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
 	"github.com/gateway-fm/loadgenerator/internal/uniswapv3"
 	"github.com/gateway-fm/loadgenerator/internal/verification"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -214,31 +214,6 @@ type LoadGenerator struct {
 	logger *slog.Logger
 }
 
-// blockMetricsPoint captures block-level metrics for a single block
-type blockMetricsPoint struct {
-	timestamp            time.Time
-	blockNumber          uint64
-	gasUsed              uint64
-	gasLimit             uint64
-	blockTime            float64 // seconds since last block
-	txCount              int     // Number of transactions in block
-	blockTimeMs          int64   // Block production interval in ms
-	filterDurationMs     int64   // Time spent filtering transactions
-	engineApiDurationMs  int64   // Time spent on Engine API calls
-	totalBuildDurationMs int64   // Total block build time
-}
-
-// rollingGasPoint tracks gas used at a specific time for rolling window calculation
-type rollingGasPoint struct {
-	timestamp time.Time
-	gasUsed   uint64
-}
-
-// rollingTxPoint tracks transaction count at a specific time for rolling window calculation
-type rollingTxPoint struct {
-	timestamp time.Time
-	txCount   int
-}
 
 const rollingWindowDuration = 5 * time.Second // 5-second rolling window for MGas/s and TX/s
 
@@ -478,7 +453,7 @@ func (lg *LoadGenerator) StartTest(req types.StartTestRequest) error {
 
 	// Validate realistic config if provided
 	if req.Pattern == types.PatternRealistic && req.RealisticConfig != nil {
-		if err := validateTxTypeRatios(req.RealisticConfig.TxTypeRatios); err != nil {
+		if err := workload.ValidateTxTypeRatios(req.RealisticConfig.TxTypeRatios); err != nil {
 			lg.setError(fmt.Sprintf("invalid realistic config: %v", err))
 			return err
 		}
@@ -1462,136 +1437,6 @@ func (lg *LoadGenerator) CheckBuilderRPC() error {
 	return err
 }
 
-// selectRandomTxType selects a transaction type based on the configured ratios.
-// Uses cumulative probability distribution to select based on weights.
-func selectRandomTxType(ratios types.TxTypeRatio, rnd *account.Rand) types.TransactionType {
-	roll := rnd.IntN(100)
-	cumulative := 0
-
-	cumulative += ratios.EthTransfer
-	if roll < cumulative {
-		return types.TxTypeEthTransfer
-	}
-
-	cumulative += ratios.ERC20Transfer
-	if roll < cumulative {
-		return types.TxTypeERC20Transfer
-	}
-
-	cumulative += ratios.ERC20Approve
-	if roll < cumulative {
-		return types.TxTypeERC20Approve
-	}
-
-	cumulative += ratios.UniswapSwap
-	if roll < cumulative {
-		return types.TxTypeUniswapSwap
-	}
-
-	cumulative += ratios.StorageWrite
-	if roll < cumulative {
-		return types.TxTypeStorageWrite
-	}
-
-	return types.TxTypeHeavyCompute
-}
-
-// generateRandomTip generates a random tip based on the configured distribution.
-// Returns the tip in wei. Supports exponential, power-law, and uniform distributions.
-func generateRandomTip(cfg *types.RealisticTestConfig, rnd *account.Rand) *big.Int {
-	if cfg == nil {
-		return big.NewInt(0)
-	}
-
-	minGwei := cfg.MinTipGwei
-	maxGwei := cfg.MaxTipGwei
-	if maxGwei <= minGwei {
-		maxGwei = minGwei + 1
-	}
-
-	var tipGwei float64
-	switch cfg.TipDistribution {
-	case types.TipDistUniform:
-		// Uniform distribution: equal probability across range
-		tipGwei = minGwei + rnd.Float64()*(maxGwei-minGwei)
-
-	case types.TipDistPowerLaw:
-		// Power-law distribution: heavily skewed toward lower values
-		// Uses inverse transform sampling with alpha = 2
-		u := rnd.Float64()
-		if u < 0.001 {
-			u = 0.001 // Avoid edge case
-		}
-		alpha := 2.0
-		tipGwei = minGwei + (maxGwei-minGwei)*(1-math.Pow(u, 1/alpha))
-
-	case types.TipDistExponential:
-		fallthrough
-	default:
-		// Exponential distribution: most tips low, exponential tail
-		// Uses inverse transform sampling: -ln(1-u)/lambda scaled to range
-		u := rnd.Float64()
-		if u >= 0.999 {
-			u = 0.999 // Avoid log(0)
-		}
-		// lambda chosen so ~95% of values fall within first half of range
-		lambda := 3.0 / (maxGwei - minGwei)
-		tipGwei = minGwei - (1/lambda)*math.Log(1-u)
-		if tipGwei > maxGwei {
-			tipGwei = maxGwei
-		}
-	}
-
-	// Convert gwei to wei (1 gwei = 1e9 wei)
-	tipWei := big.NewInt(int64(tipGwei * 1e9))
-	return tipWei
-}
-
-// getDefaultRealisticConfig returns the default realistic test configuration.
-// Used by adaptive-realistic pattern which uses sensible defaults.
-func getDefaultRealisticConfig() *types.RealisticTestConfig {
-	return &types.RealisticTestConfig{
-		NumAccounts: 100,
-		TargetTPS:   500,
-		TxTypeRatios: types.TxTypeRatio{
-			EthTransfer:   50,
-			ERC20Transfer: 20,
-			ERC20Approve:  5,
-			UniswapSwap:   15,
-			StorageWrite:  5,
-			HeavyCompute:  5,
-		},
-		TipDistribution: types.TipDistExponential,
-		MinTipGwei:      0,
-		MaxTipGwei:      10,
-	}
-}
-
-// validateTxTypeRatios validates that transaction type ratios are valid.
-// Returns an error if ratios don't sum to 100 or contain invalid values.
-func validateTxTypeRatios(ratios types.TxTypeRatio) error {
-	sum := ratios.EthTransfer + ratios.ERC20Transfer + ratios.ERC20Approve +
-		ratios.UniswapSwap + ratios.StorageWrite + ratios.HeavyCompute
-
-	if sum != 100 {
-		return fmt.Errorf("txTypeRatios must sum to 100, got %d", sum)
-	}
-
-	for name, v := range map[string]int{
-		"ethTransfer":   ratios.EthTransfer,
-		"erc20Transfer": ratios.ERC20Transfer,
-		"erc20Approve":  ratios.ERC20Approve,
-		"uniswapSwap":   ratios.UniswapSwap,
-		"storageWrite":  ratios.StorageWrite,
-		"heavyCompute":  ratios.HeavyCompute,
-	} {
-		if v < 0 || v > 100 {
-			return fmt.Errorf("ratio %s must be 0-100, got %d", name, v)
-		}
-	}
-
-	return nil
-}
 
 // senderWorker is a goroutine that sends transactions at the target rate.
 // Uses token bucket rate limiter for smooth, non-bursty traffic generation.
@@ -1620,7 +1465,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			realisticCfg = lg.testConfig.RealisticConfig
 		} else {
 			// Use defaults for adaptive-realistic pattern
-			realisticCfg = getDefaultRealisticConfig()
+			realisticCfg = workload.DefaultRealisticConfig()
 		}
 	}
 
@@ -1673,8 +1518,8 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 
 			if useRealisticTxGen && realisticCfg != nil {
 				// Realistic/adaptive-realistic mode: random tx type and tip
-				txType = selectRandomTxType(realisticCfg.TxTypeRatios, rnd)
-				tipWei = generateRandomTip(realisticCfg, rnd)
+				txType = workload.SelectRandomTxType(realisticCfg.TxTypeRatios, rnd)
+				tipWei = workload.GenerateRandomTip(realisticCfg, rnd)
 
 				var err error
 				builder, err = lg.txBuilderReg.Get(txType)
@@ -2397,35 +2242,6 @@ func (lg *LoadGenerator) fetchBuilderConfig() *storage.EnvironmentSnapshot {
 	return env
 }
 
-type builderHeaderAttestationResponse struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Status        string `json:"status"`
-	Domain        struct {
-		ChainID uint64 `json:"chainId"`
-	} `json:"domain"`
-	Commitment struct {
-		BlockHash        string `json:"blockHash"`
-		ParentHash       string `json:"parentHash"`
-		StateRoot        string `json:"stateRoot"`
-		ReceiptsRoot     string `json:"receiptsRoot"`
-		BlockNumber      uint64 `json:"blockNumber"`
-		Timestamp        uint64 `json:"timestamp"`
-		GasUsed          uint64 `json:"gasUsed"`
-		BaseFeePerGasWei any    `json:"baseFeePerGasWei"`
-		SequencerAddress string `json:"sequencerAddress"`
-	} `json:"commitment"`
-	DigestHex    string    `json:"digestHex"`
-	SignatureHex string    `json:"signatureHex"`
-	RHex         string    `json:"rHex"`
-	SHex         string    `json:"sHex"`
-	V            uint8     `json:"v"`
-	KeyID        string    `json:"keyId"`
-	Provider     string    `json:"provider"`
-	Failover     bool      `json:"failover"`
-	Error        string    `json:"error"`
-	SignedAt     time.Time `json:"signedAt"`
-}
-
 // fetchHeaderAttestations retrieves signed header attestations for the test block range.
 func (lg *LoadGenerator) fetchHeaderAttestations(ctx context.Context, firstBlock, lastBlock uint64) []storage.HeaderAttestation {
 	if firstBlock == 0 || lastBlock == 0 || lastBlock < firstBlock {
@@ -3119,26 +2935,6 @@ func (lg *LoadGenerator) processNewHead(numberHex, gasUsedHex, gasLimitHex strin
 	lg.recentBlockNumbersMu.Unlock()
 }
 
-// parseHexUint64 parses a hex string (with or without 0x prefix) to uint64.
-func parseHexUint64(s string) (uint64, error) {
-	if len(s) > 2 && s[:2] == "0x" {
-		s = s[2:]
-	}
-	var n uint64
-	_, err := fmt.Sscanf(s, "%x", &n)
-	return n, err
-}
-
-// onChainMetricsResult holds the results of on-chain verification.
-type onChainMetricsResult struct {
-	firstBlock   uint64
-	lastBlock    uint64
-	txCount      uint64
-	gasUsed      uint64
-	mgasPerSec   float64
-	tps          float64
-	durationSecs float64
-}
 
 // calculateOnChainMetrics queries the chain for actual block metrics between first and last block.
 // This provides ground-truth metrics independent of WebSocket events which may have been lost.
@@ -4567,7 +4363,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 		// Get the realistic config (use provided or defaults for adaptive-realistic)
 		realisticCfg := lg.testConfig.RealisticConfig
 		if realisticCfg == nil {
-			realisticCfg = getDefaultRealisticConfig()
+			realisticCfg = workload.DefaultRealisticConfig()
 		}
 		testRun.TipHistogram = lg.metricsCol.GetTipHistogram(realisticCfg)
 		testRun.TxTypeMetrics = lg.metricsCol.GetTxTypeMetrics()
@@ -4625,24 +4421,6 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 	}
 }
 
-// getEnvOrDefault returns environment variable or default value.
-func getEnvOrDefault(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
-}
-
-// getEnvIntOrDefault returns environment variable as int or default value.
-func getEnvIntOrDefault(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		var i int
-		if _, err := fmt.Sscanf(val, "%d", &i); err == nil {
-			return i
-		}
-	}
-	return defaultVal
-}
 
 // startIncrementalVerification starts the background incremental verification goroutine.
 // This runs every 5 minutes during long tests to avoid massive verification at the end.
