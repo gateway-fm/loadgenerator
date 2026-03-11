@@ -155,7 +155,7 @@ type LoadGenerator struct {
 	stopping int32 // atomic
 
 	// Async transaction sender with backpressure
-	sender *sender.Sender
+	sender TxSender
 
 	// Test history (in-memory cache for backwards compatibility)
 	testHistory   []types.TestResult
@@ -220,6 +220,11 @@ func WithMetricsCollector(c metrics.Collector) Option {
 	return func(lg *LoadGenerator) { lg.metricsCol = c }
 }
 
+// WithSender sets the transaction sender.
+func WithSender(s TxSender) Option {
+	return func(lg *LoadGenerator) { lg.sender = s }
+}
+
 // NewLoadGenerator creates a new LoadGenerator with all dependencies wired.
 func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Logger, opts ...Option) (*LoadGenerator, error) {
 	chainID := big.NewInt(cfg.ChainID)
@@ -281,15 +286,16 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	deployer.SetUseLegacy(useLegacy)
 	lg.deployer = deployer
 
-	// Create async sender with backpressure
+	// Create default async sender with backpressure if not injected
 	// Concurrency must be high enough to saturate target TPS:
 	// required = target_tps × avg_rpc_latency_sec (e.g., 30k × 0.02 = 600 minimum)
-	snd := sender.New(sender.Config{
-		Client:      lg.builderClient,
-		Concurrency: 2000, // Max concurrent in-flight sends
-		Logger:      logger,
-	})
-	lg.sender = snd
+	if lg.sender == nil {
+		lg.sender = sender.New(sender.Config{
+			Client:      lg.builderClient,
+			Concurrency: 2000, // Max concurrent in-flight sends
+			Logger:      logger,
+		})
+	}
 
 	// Wire cache storage if the store supports it
 	if cs, ok := store.(storage.CacheStorage); ok {
