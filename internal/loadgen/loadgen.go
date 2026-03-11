@@ -43,7 +43,7 @@ type LoadGenerator struct {
 	patternReg    *pattern.Registry
 	txBuilderReg  *txbuilder.Registry
 	metricsCol    metrics.Collector
-	deployer      *contract.Deployer
+	deployer      ContractDeployer
 	storage       storage.Storage
 	cacheStorage  storage.CacheStorage
 
@@ -225,6 +225,11 @@ func WithSender(s TxSender) Option {
 	return func(lg *LoadGenerator) { lg.sender = s }
 }
 
+// WithDeployer sets the contract deployer.
+func WithDeployer(d ContractDeployer) Option {
+	return func(lg *LoadGenerator) { lg.deployer = d }
+}
+
 // NewLoadGenerator creates a new LoadGenerator with all dependencies wired.
 func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Logger, opts ...Option) (*LoadGenerator, error) {
 	chainID := big.NewInt(cfg.ChainID)
@@ -281,10 +286,12 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		lg.metricsCol = metrics.NewInMemoryCollector(true)
 	}
 
-	// Create contract deployer
-	deployer := contract.NewDeployer(lg.builderClient, chainID, gasPrice, logger)
-	deployer.SetUseLegacy(useLegacy)
-	lg.deployer = deployer
+	// Create default contract deployer if not injected
+	if lg.deployer == nil {
+		deployer := contract.NewDeployer(lg.builderClient, chainID, gasPrice, logger)
+		deployer.SetUseLegacy(useLegacy)
+		lg.deployer = deployer
+	}
 
 	// Create default async sender with backpressure if not injected
 	// Concurrency must be high enough to saturate target TPS:
