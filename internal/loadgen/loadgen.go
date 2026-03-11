@@ -202,19 +202,28 @@ type LoadGenerator struct {
 }
 
 
+// Option configures a LoadGenerator. Use WithXxx functions to override defaults.
+type Option func(*LoadGenerator)
+
+// WithBuilderClient sets the RPC client used for transaction submission.
+func WithBuilderClient(c rpc.Client) Option {
+	return func(lg *LoadGenerator) { lg.builderClient = c }
+}
+
+// WithL2Client sets the RPC client used for L2 confirmation polling.
+func WithL2Client(c rpc.Client) Option {
+	return func(lg *LoadGenerator) { lg.l2Client = c }
+}
+
+// WithMetricsCollector sets the metrics collector.
+func WithMetricsCollector(c metrics.Collector) Option {
+	return func(lg *LoadGenerator) { lg.metricsCol = c }
+}
+
 // NewLoadGenerator creates a new LoadGenerator with all dependencies wired.
-func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Logger) (*LoadGenerator, error) {
+func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Logger, opts ...Option) (*LoadGenerator, error) {
 	chainID := big.NewInt(cfg.ChainID)
 	gasPrice := big.NewInt(cfg.GasPrice)
-
-	// Create RPC clients
-	builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
-	builderCfg.Logger = logger
-	builderClient := rpc.NewHTTPClient(builderCfg)
-
-	l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
-	l2Cfg.Logger = logger
-	l2Client := rpc.NewHTTPClient(l2Cfg)
 
 	// Create account manager
 	useLegacy := cfg.Capabilities != nil && cfg.Capabilities.RequiresLegacyTx
@@ -233,38 +242,54 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	}
 	txBuilderReg := txbuilder.NewDefaultRegistry(recipient)
 
-	// Create metrics collector
-	metricsCol := metrics.NewInMemoryCollector(true)
+	lg := &LoadGenerator{
+		cfg:              cfg,
+		accountMgr:       accountMgr,
+		patternReg:       patternReg,
+		txBuilderReg:     txBuilderReg,
+		storage:          store,
+		status:           types.StatusIdle,
+		preconfLatencies: metrics.NewStreamingLatencyStats(),
+		testHistory:      make([]types.TestResult, 0),
+		logger:           logger,
+	}
+
+	// Apply functional options (before defaults, so options take priority)
+	for _, opt := range opts {
+		opt(lg)
+	}
+
+	// Create default RPC clients if not injected
+	if lg.builderClient == nil {
+		builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
+		builderCfg.Logger = logger
+		lg.builderClient = rpc.NewHTTPClient(builderCfg)
+	}
+	if lg.l2Client == nil {
+		l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
+		l2Cfg.Logger = logger
+		lg.l2Client = rpc.NewHTTPClient(l2Cfg)
+	}
+
+	// Create default metrics collector if not injected
+	if lg.metricsCol == nil {
+		lg.metricsCol = metrics.NewInMemoryCollector(true)
+	}
 
 	// Create contract deployer
-	deployer := contract.NewDeployer(builderClient, chainID, gasPrice, logger)
+	deployer := contract.NewDeployer(lg.builderClient, chainID, gasPrice, logger)
 	deployer.SetUseLegacy(useLegacy)
+	lg.deployer = deployer
 
 	// Create async sender with backpressure
 	// Concurrency must be high enough to saturate target TPS:
 	// required = target_tps × avg_rpc_latency_sec (e.g., 30k × 0.02 = 600 minimum)
 	snd := sender.New(sender.Config{
-		Client:      builderClient,
+		Client:      lg.builderClient,
 		Concurrency: 2000, // Max concurrent in-flight sends
 		Logger:      logger,
 	})
-
-	lg := &LoadGenerator{
-		cfg:              cfg,
-		builderClient:    builderClient,
-		l2Client:         l2Client,
-		accountMgr:       accountMgr,
-		patternReg:       patternReg,
-		txBuilderReg:     txBuilderReg,
-		metricsCol:       metricsCol,
-		deployer:         deployer,
-		storage:          store,
-		status:           types.StatusIdle,
-		preconfLatencies: metrics.NewStreamingLatencyStats(),
-		testHistory:      make([]types.TestResult, 0),
-		sender:           snd,
-		logger:           logger,
-	}
+	lg.sender = snd
 
 	// Wire cache storage if the store supports it
 	if cs, ok := store.(storage.CacheStorage); ok {
