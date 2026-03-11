@@ -1,4 +1,4 @@
-package main
+package loadgen
 
 import (
 	"fmt"
@@ -83,16 +83,16 @@ func parseHexUint64(s string) (uint64, error) {
 	return n, err
 }
 
-// getEnvOrDefault returns environment variable or default value.
-func getEnvOrDefault(key, defaultVal string) string {
+// GetEnvOrDefault returns environment variable or default value.
+func GetEnvOrDefault(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
 	}
 	return defaultVal
 }
 
-// getEnvIntOrDefault returns environment variable as int or default value.
-func getEnvIntOrDefault(key string, defaultVal int) int {
+// GetEnvIntOrDefault returns environment variable as int or default value.
+func GetEnvIntOrDefault(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		var i int
 		if _, err := fmt.Sscanf(val, "%d", &i); err == nil {
