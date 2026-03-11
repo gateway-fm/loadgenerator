@@ -126,14 +126,6 @@ Always run `make test` before submitting a pull request. All tests must pass wit
 - Table-driven tests for all new code.
 - Max 300 lines per file, max 50 lines per function (split if larger).
 
-## Git Workflow
-
-When committing, use `--no-gpg-sign` to avoid GPG timeout issues:
-
-```bash
-git commit --no-gpg-sign -m "commit message"
-```
-
 ## Docker
 
 ```bash

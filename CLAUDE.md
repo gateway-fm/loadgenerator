@@ -2,13 +2,6 @@
 
 High-throughput transaction load generator for testing blockchain sequencers.
 
-## Git Workflow
-
-When committing, use `--no-gpg-sign` to avoid GPG timeout issues:
-```bash
-git commit --no-gpg-sign -m "commit message"
-```
-
 ## Go Setup
 
 Go 1.25 is installed locally at `~/go-local/go/bin`. Just run `go` directly:
