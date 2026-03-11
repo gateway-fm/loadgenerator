@@ -39,7 +39,7 @@ type LoadGenerator struct {
 	cfg           *config.Config
 	builderClient rpc.Client
 	l2Client      rpc.Client
-	accountMgr    *account.Manager
+	accountMgr    AccountManager
 	patternReg    *pattern.Registry
 	txBuilderReg  *txbuilder.Registry
 	metricsCol    metrics.Collector
@@ -230,33 +230,19 @@ func WithDeployer(d ContractDeployer) Option {
 	return func(lg *LoadGenerator) { lg.deployer = d }
 }
 
+// WithAccountManager sets the account manager.
+func WithAccountManager(m AccountManager) Option {
+	return func(lg *LoadGenerator) { lg.accountMgr = m }
+}
+
 // NewLoadGenerator creates a new LoadGenerator with all dependencies wired.
 func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Logger, opts ...Option) (*LoadGenerator, error) {
 	chainID := big.NewInt(cfg.ChainID)
 	gasPrice := big.NewInt(cfg.GasPrice)
-
-	// Create account manager
 	useLegacy := cfg.Capabilities != nil && cfg.Capabilities.RequiresLegacyTx
-	accountMgr, err := account.NewManager(chainID, gasPrice, useLegacy, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create account manager: %w", err)
-	}
-
-	// Create registries
-	patternReg := pattern.NewRegistry()
-	// Use the first account as default recipient for ETH transfers
-	accounts := accountMgr.GetAccounts()
-	var recipient common.Address
-	if len(accounts) > 0 {
-		recipient = accounts[0].Address
-	}
-	txBuilderReg := txbuilder.NewDefaultRegistry(recipient)
 
 	lg := &LoadGenerator{
 		cfg:              cfg,
-		accountMgr:       accountMgr,
-		patternReg:       patternReg,
-		txBuilderReg:     txBuilderReg,
 		storage:          store,
 		status:           types.StatusIdle,
 		preconfLatencies: metrics.NewStreamingLatencyStats(),
@@ -264,10 +250,29 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		logger:           logger,
 	}
 
-	// Apply functional options (before defaults, so options take priority)
+	// Apply functional options first so injected deps take priority
 	for _, opt := range opts {
 		opt(lg)
 	}
+
+	// Create default account manager if not injected
+	if lg.accountMgr == nil {
+		accountMgr, err := account.NewManager(chainID, gasPrice, useLegacy, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create account manager: %w", err)
+		}
+		lg.accountMgr = accountMgr
+	}
+
+	// Create registries
+	lg.patternReg = pattern.NewRegistry()
+	// Use the first account as default recipient for ETH transfers
+	accounts := lg.accountMgr.GetAccounts()
+	var recipient common.Address
+	if len(accounts) > 0 {
+		recipient = accounts[0].Address
+	}
+	lg.txBuilderReg = txbuilder.NewDefaultRegistry(recipient)
 
 	// Create default RPC clients if not injected
 	if lg.builderClient == nil {
