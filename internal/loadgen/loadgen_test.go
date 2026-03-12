@@ -212,25 +212,37 @@ func TestNewLoadGenerator_NoAccountsEmptyRecipient(t *testing.T) {
 func TestStartTest_SetsStatusInitializing(t *testing.T) {
 	lg := newTestLoadGenerator(t)
 
+	// Capture status synchronously: StartTest sets StatusInitializing
+	// before launching the goroutine, so we can check it immediately
+	// by hooking into the mock account manager.
+	statusAfterStart := make(chan types.TestStatus, 1)
+	origMgr := lg.accountMgr.(*mockAccountManager)
+	origMgr.GenerateDynamicAccountsFn = func(count int) error {
+		// This runs inside the goroutine — capture status at this point
+		lg.statusMu.RLock()
+		s := lg.status
+		lg.statusMu.RUnlock()
+		statusAfterStart <- s
+		return nil
+	}
+
 	err := lg.StartTest(types.StartTestRequest{
 		Pattern:      types.PatternConstant,
 		DurationSec:  10,
 		ConstantRate: 100,
-		NumAccounts:  1,
+		NumAccounts:  0, // triggers GenerateDynamicAccounts
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Give goroutine a moment to start
-	time.Sleep(10 * time.Millisecond)
-
-	lg.statusMu.RLock()
-	status := lg.status
-	lg.statusMu.RUnlock()
-
-	if status != types.StatusInitializing && status != types.StatusRunning {
-		t.Errorf("expected status initializing or running, got %q", status)
+	select {
+	case s := <-statusAfterStart:
+		if s != types.StatusInitializing {
+			t.Errorf("expected status %q during init, got %q", types.StatusInitializing, s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for initialization to start")
 	}
 
 	// Clean up
