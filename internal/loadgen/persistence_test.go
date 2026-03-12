@@ -8,22 +8,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/gateway-fm/loadgenerator/internal/account"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
-
-func makeTestAccount(t *testing.T) *account.Account {
-	t.Helper()
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return account.NewAccount(key)
-}
 
 func TestShouldLogTransactions(t *testing.T) {
 	lg := newTestLoadGenerator(t)

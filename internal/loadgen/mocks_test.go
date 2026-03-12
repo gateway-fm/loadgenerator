@@ -4,13 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
+	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gateway-fm/loadgenerator/internal/account"
 	"github.com/gateway-fm/loadgenerator/internal/contract"
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 )
+
+func makeTestAccount(t *testing.T) *account.Account {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return account.NewAccount(key)
+}
 
 // mockRPCClient implements rpc.Client with configurable function fields.
 // Only set the functions your test needs; unset methods return zero values.
