@@ -54,23 +54,31 @@ internal/loadgen/helpers.go      — shared types & utilities (102 lines)
 | `internal/contract` | 0% | |
 | **Overall** | **~30%** | |
 
+## Pre-existing Bugs (from PR #5 review)
+
+Identified by Copilot review. These are **not regressions** — they existed in the original monolith and were carried across during the refactor.
+
+### Bugs
+
+- [ ] **WebSocket connection leaks** — `websocket.go:63,282,494`: Three places where `lg.*WsConn` is set to nil on error without calling `conn.Close()` first. Leaks file descriptors across reconnect attempts.
+- [ ] **RPC fallback reports blocks as TXs** — `blockmetrics.go:288`: `rollingTxWindow` receives `rpcBlockCount` (block count) instead of actual transaction count. Makes `calculateRollingTxPerSec` undercount on RPC fallback path. Fix: sum `block.TxCount` in `getBlockMetricsViaRPC` and return it.
+- [ ] **StopTest race on concurrent calls** — `loadgen.go:398`: `StopTest` can be invoked concurrently (e.g., `/stop` handler + `completionWatcher`). No idempotency guard — can double-close `incrementalStopCh` or run shutdown twice. Fix: `atomic.CompareAndSwapInt32` on `lg.stopping` or `sync.Once`.
+
+### Feature Gaps
+
+- [ ] **StartTest skips ratio validation for adaptive-realistic** — `loadgen.go:375`: Only validates `txTypeRatios` for `PatternRealistic`, not `PatternAdaptiveRealistic`. Invalid ratios can slip through.
+- [ ] **Adaptive-realistic doesn't deploy required contracts** — `init.go:242`: Contract deployment only considers `PatternRealistic`. `PatternAdaptiveRealistic` uses realistic mixed TX generation but may start without deploying ERC20/Uniswap contracts, causing send failures.
+
 ## Recommended Next Steps
 
-### High Priority — Test Coverage for internal/loadgen
-The refactor to `internal/loadgen` makes this code testable for the first time (was `package main` before). Priority files by impact:
-
-1. **`helpers.go`** — pure functions (`parseHexUint64`, `GetEnvOrDefault`), easiest wins
-2. **`blockmetrics.go`** — rolling window calculations, percentile math — pure logic, high value
-3. **`api.go`** — handler logic can be tested with mock LoadGenerator
-4. **`builder.go`** — `parseNodeName`, `fetchBuilderPressure` parsing logic
-5. **`workers.go`** — core send/confirm loop, hardest to unit test (needs mocks)
+### High Priority — Bug Fixes
+Address the pre-existing bugs above.
 
 ### Medium Priority — Structural Improvements
-- **Extract interfaces** for builder/RPC communication to enable mocking
 - **Reduce file sizes** — `blockmetrics.go` (588), `websocket.go` (550), `workers.go` (540) could be split further
 - **Move types to dedicated file** — `blockMetricsPoint`, `rollingGasPoint` etc. in helpers.go should be in a types file
 
-### Lower Priority
+### Lower Priority — Coverage
 - **`internal/contract`** — 0% coverage
 - **`internal/rpc`** — 4% coverage, mostly integration-dependent
 - **Dockerfile** — unstaged change pins Go 1.25.7 (unrelated to refactor)
