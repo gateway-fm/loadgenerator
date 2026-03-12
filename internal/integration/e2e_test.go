@@ -70,8 +70,15 @@ func TestE2ENonceOrdering(t *testing.T) {
 	// Wait for completion
 	waitForTestCompletion(t, testID, 30*time.Second)
 
-	// Fetch all transaction logs
-	txLogs := fetchAllTxLogs(t, testID)
+	// Fetch all transaction logs (async write may still be in progress after completion)
+	var txLogs []txLogEntry
+	for i := 0; i < 10; i++ {
+		txLogs = fetchAllTxLogs(t, testID)
+		if len(txLogs) > 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	t.Logf("Fetched %d transaction logs", len(txLogs))
 
 	if len(txLogs) == 0 {

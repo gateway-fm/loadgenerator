@@ -69,6 +69,10 @@ Identified by Copilot review. These are **not regressions** — they existed in 
 - [ ] **StartTest skips ratio validation for adaptive-realistic** — `loadgen.go:375`: Only validates `txTypeRatios` for `PatternRealistic`, not `PatternAdaptiveRealistic`. Invalid ratios can slip through.
 - [ ] **Adaptive-realistic doesn't deploy required contracts** — `init.go:242`: Contract deployment only considers `PatternRealistic`. `PatternAdaptiveRealistic` uses realistic mixed TX generation but may start without deploying ERC20/Uniswap contracts, causing send failures.
 
+### Flaky E2E Tests
+
+- [x] **TestE2ENonceOrdering race with async tx log persistence** — `persistence.go:493` writes tx logs in a background goroutine, but `StopTest` sets status to `completed` before the write finishes. E2E test fetches `/history/{testID}/transactions` immediately after seeing `completed` → 0 rows. Fixed by adding a retry loop in `e2e_test.go:73`. Root cause (async write without signalling completion) is pre-existing — tracked as a separate concern.
+
 ## Recommended Next Steps
 
 ### High Priority — Bug Fixes
