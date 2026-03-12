@@ -50,7 +50,7 @@ internal/loadgen/helpers.go      — shared types & utilities (102 lines)
 | `internal/transport` | 18% | |
 | `internal/verification` | 13% | |
 | `internal/rpc` | 4% | |
-| **`internal/loadgen`** | **65.9%** | **4,736** |
+| **`internal/loadgen`** | **73.6%** | **4,736** |
 | `internal/contract` | 0% | |
 | **Overall** | **~30%** | |
 
