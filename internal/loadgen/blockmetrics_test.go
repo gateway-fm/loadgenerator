@@ -2,11 +2,13 @@ package loadgen
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 )
 
@@ -658,5 +660,363 @@ func TestCalculateRollingMgasPerSec_WindowBoundary(t *testing.T) {
 	lg.blockMetricsMu.Unlock()
 	if remaining != 3 {
 		t.Errorf("expected 3 entries after boundary prune, got %d", remaining)
+	}
+}
+
+func TestRecordTimeSeriesPoint_WithWSBlockMetrics(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+	lg.ctx, lg.cancel = context.WithCancel(context.Background())
+	defer lg.cancel()
+	lg.startTime = time.Now().Add(-3 * time.Second)
+	lg.timeSeriesBuf = make([]storage.TimeSeriesPoint, 0, 10)
+	atomic.StoreInt64(&lg.currentRate, 500)
+
+	now := time.Now()
+	lg.blockMetricsMu.Lock()
+	lg.blockMetrics = []blockMetricsPoint{
+		{gasUsed: 21_000_000, gasLimit: 30_000_000, blockTime: 1.0, blockTimeMs: 1000},
+		{gasUsed: 42_000_000, gasLimit: 30_000_000, blockTime: 1.0, blockTimeMs: 1000},
+	}
+	lg.rollingGasWindow = []rollingGasPoint{
+		{timestamp: now.Add(-3 * time.Second), gasUsed: 21_000_000},
+		{timestamp: now.Add(-2 * time.Second), gasUsed: 42_000_000},
+		{timestamp: now.Add(-1 * time.Second), gasUsed: 21_000_000},
+	}
+	lg.blockMetricsMu.Unlock()
+
+	lg.recordTimeSeriesPoint()
+
+	if len(lg.timeSeriesBuf) != 1 {
+		t.Fatalf("expected 1 point, got %d", len(lg.timeSeriesBuf))
+	}
+	p := lg.timeSeriesBuf[0]
+	if p.GasUsed != 63_000_000 {
+		t.Errorf("expected gasUsed=63000000 from WS data, got %d", p.GasUsed)
+	}
+	if p.BlockCount != 2 {
+		t.Errorf("expected blockCount=2, got %d", p.BlockCount)
+	}
+	if p.TargetTPS != 500 {
+		t.Errorf("expected targetTPS=500, got %d", p.TargetTPS)
+	}
+	if p.TimestampMs <= 0 {
+		t.Errorf("expected positive timestamp, got %d", p.TimestampMs)
+	}
+}
+
+func TestRecordTimeSeriesPoint_RPCFallbackWhenNoWSData(t *testing.T) {
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			return 100, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+	lg.ctx, lg.cancel = context.WithCancel(context.Background())
+	defer lg.cancel()
+	lg.startTime = time.Now().Add(-3 * time.Second)
+	lg.timeSeriesBuf = make([]storage.TimeSeriesPoint, 0, 10)
+
+	// No WS block metrics → triggers RPC fallback
+	// First call initializes rpcLastBlockNumber, so gasUsed=0
+	lg.recordTimeSeriesPoint()
+
+	if len(lg.timeSeriesBuf) != 1 {
+		t.Fatalf("expected 1 point, got %d", len(lg.timeSeriesBuf))
+	}
+	p := lg.timeSeriesBuf[0]
+	if p.GasUsed != 0 {
+		t.Errorf("expected gasUsed=0 on first RPC call (init), got %d", p.GasUsed)
+	}
+}
+
+func TestRecordTimeSeriesPoint_MultipleAppends(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+	lg.ctx, lg.cancel = context.WithCancel(context.Background())
+	defer lg.cancel()
+	lg.startTime = time.Now().Add(-5 * time.Second)
+	lg.timeSeriesBuf = make([]storage.TimeSeriesPoint, 0, 10)
+
+	lg.recordTimeSeriesPoint()
+	lg.recordTimeSeriesPoint()
+	lg.recordTimeSeriesPoint()
+
+	if len(lg.timeSeriesBuf) != 3 {
+		t.Errorf("expected 3 points appended, got %d", len(lg.timeSeriesBuf))
+	}
+	// Timestamps should be increasing
+	for i := 1; i < len(lg.timeSeriesBuf); i++ {
+		if lg.timeSeriesBuf[i].TimestampMs < lg.timeSeriesBuf[i-1].TimestampMs {
+			t.Errorf("timestamps not monotonic: point[%d]=%d < point[%d]=%d",
+				i, lg.timeSeriesBuf[i].TimestampMs, i-1, lg.timeSeriesBuf[i-1].TimestampMs)
+		}
+	}
+}
+
+func TestRecordTimeSeriesPoint_IncludesAvgBlockTime(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+	lg.ctx, lg.cancel = context.WithCancel(context.Background())
+	defer lg.cancel()
+	lg.startTime = time.Now().Add(-3 * time.Second)
+	lg.timeSeriesBuf = make([]storage.TimeSeriesPoint, 0, 10)
+
+	lg.blockMetricsMu.Lock()
+	lg.blockMetrics = []blockMetricsPoint{
+		{gasUsed: 10_000_000, gasLimit: 30_000_000, blockTime: 1.0, blockTimeMs: 800},
+		{gasUsed: 10_000_000, gasLimit: 30_000_000, blockTime: 1.0, blockTimeMs: 1200},
+	}
+	lg.blockMetricsMu.Unlock()
+
+	lg.recordTimeSeriesPoint()
+
+	if len(lg.timeSeriesBuf) != 1 {
+		t.Fatalf("expected 1 point, got %d", len(lg.timeSeriesBuf))
+	}
+	p := lg.timeSeriesBuf[0]
+	if p.AvgBlockTimeMs != 1000 {
+		t.Errorf("expected avgBlockTimeMs=1000, got %f", p.AvgBlockTimeMs)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_NilL2Client(t *testing.T) {
+	lg := newTestLoadGenerator(t, WithL2Client(nil))
+
+	gasUsed, gasLimit, blockCount, mgasPerSec, fillRate := lg.getBlockMetricsViaRPC()
+	if gasUsed != 0 || gasLimit != 0 || blockCount != 0 || mgasPerSec != 0 || fillRate != 0 {
+		t.Errorf("expected all zeros for nil l2Client, got gasUsed=%d gasLimit=%d blocks=%d mgas=%f fill=%f",
+			gasUsed, gasLimit, blockCount, mgasPerSec, fillRate)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_GetBlockNumberError(t *testing.T) {
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			return 0, fmt.Errorf("rpc error")
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	gasUsed, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+	if gasUsed != 0 || blockCount != 0 {
+		t.Errorf("expected zeros on GetBlockNumber error, got gasUsed=%d blocks=%d", gasUsed, blockCount)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_FirstCallInitializes(t *testing.T) {
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			return 50, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	gasUsed, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+	if gasUsed != 0 || blockCount != 0 {
+		t.Errorf("expected zeros on first call (init), got gasUsed=%d blocks=%d", gasUsed, blockCount)
+	}
+
+	lg.blockMetricsMu.Lock()
+	lastBlock := lg.rpcLastBlockNumber
+	lg.blockMetricsMu.Unlock()
+	if lastBlock != 50 {
+		t.Errorf("expected rpcLastBlockNumber=50 after init, got %d", lastBlock)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_NoNewBlocks(t *testing.T) {
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			return 50, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	// First call: initialize
+	lg.getBlockMetricsViaRPC()
+
+	// Second call: same block number → no new blocks
+	gasUsed, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+	if gasUsed != 0 || blockCount != 0 {
+		t.Errorf("expected zeros when no new blocks, got gasUsed=%d blocks=%d", gasUsed, blockCount)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_NewBlocksFetchesAndCalculates(t *testing.T) {
+	callCount := 0
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			callCount++
+			if callCount == 1 {
+				return 10, nil // init call
+			}
+			return 13, nil // 3 new blocks: 11, 12, 13
+		},
+		GetBlockByNumberFn: func(ctx context.Context, blockNum uint64) (*rpc.Block, error) {
+			return &rpc.Block{
+				Number:   blockNum,
+				GasUsed:  21_000_000,
+				GasLimit: 30_000_000,
+			}, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	// First call: initialize
+	lg.getBlockMetricsViaRPC()
+
+	// Second call: fetch blocks 11-13
+	gasUsed, gasLimit, blockCount, mgasPerSec, fillRate := lg.getBlockMetricsViaRPC()
+
+	if blockCount != 3 {
+		t.Errorf("expected blockCount=3, got %d", blockCount)
+	}
+	if gasUsed != 63_000_000 {
+		t.Errorf("expected gasUsed=63000000, got %d", gasUsed)
+	}
+	if gasLimit != 90_000_000 {
+		t.Errorf("expected gasLimit=90000000, got %d", gasLimit)
+	}
+	if mgasPerSec <= 0 {
+		t.Errorf("expected positive mgasPerSec, got %f", mgasPerSec)
+	}
+	// fillRate = 63M / 90M * 100 = 70%
+	if fillRate < 69 || fillRate > 71 {
+		t.Errorf("expected fillRate ~70%%, got %f", fillRate)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_BlockFetchErrorSkipsBlock(t *testing.T) {
+	callCount := 0
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			callCount++
+			if callCount == 1 {
+				return 10, nil
+			}
+			return 13, nil
+		},
+		GetBlockByNumberFn: func(ctx context.Context, blockNum uint64) (*rpc.Block, error) {
+			if blockNum == 12 {
+				return nil, fmt.Errorf("block fetch error")
+			}
+			return &rpc.Block{
+				Number:   blockNum,
+				GasUsed:  21_000_000,
+				GasLimit: 30_000_000,
+			}, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	lg.getBlockMetricsViaRPC()
+	gasUsed, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+
+	if blockCount != 2 {
+		t.Errorf("expected blockCount=2 (block 12 skipped), got %d", blockCount)
+	}
+	if gasUsed != 42_000_000 {
+		t.Errorf("expected gasUsed=42000000, got %d", gasUsed)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_NilBlockSkipped(t *testing.T) {
+	callCount := 0
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			callCount++
+			if callCount == 1 {
+				return 10, nil
+			}
+			return 12, nil
+		},
+		GetBlockByNumberFn: func(ctx context.Context, blockNum uint64) (*rpc.Block, error) {
+			if blockNum == 11 {
+				return nil, nil // nil block, no error
+			}
+			return &rpc.Block{
+				Number:   blockNum,
+				GasUsed:  21_000_000,
+				GasLimit: 30_000_000,
+			}, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	lg.getBlockMetricsViaRPC()
+	_, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+
+	if blockCount != 1 {
+		t.Errorf("expected blockCount=1 (nil block skipped), got %d", blockCount)
+	}
+}
+
+func TestGetBlockMetricsViaRPC_LimitsToLast10Blocks(t *testing.T) {
+	callCount := 0
+	fetchedBlocks := make(map[uint64]bool)
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			callCount++
+			if callCount == 1 {
+				return 10, nil
+			}
+			return 30, nil // 20 new blocks, but should limit to last 10
+		},
+		GetBlockByNumberFn: func(ctx context.Context, blockNum uint64) (*rpc.Block, error) {
+			fetchedBlocks[blockNum] = true
+			return &rpc.Block{
+				Number:   blockNum,
+				GasUsed:  1_000_000,
+				GasLimit: 30_000_000,
+			}, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+
+	lg.getBlockMetricsViaRPC()
+	_, _, blockCount, _, _ := lg.getBlockMetricsViaRPC()
+
+	if blockCount != 10 {
+		t.Errorf("expected blockCount=10 (limited), got %d", blockCount)
+	}
+	// Should start at block 21 (30 - 10 + 1), not block 11
+	if fetchedBlocks[11] {
+		t.Error("should not have fetched block 11 (outside last-10 window)")
+	}
+	if !fetchedBlocks[21] {
+		t.Error("expected block 21 to be fetched (start of last-10 window)")
+	}
+	if !fetchedBlocks[30] {
+		t.Error("expected block 30 to be fetched")
+	}
+}
+
+func TestGetBlockMetricsViaRPC_UsesConfigBlockTimeMS(t *testing.T) {
+	callCount := 0
+	mock := &mockRPCClient{
+		GetBlockNumberFn: func(ctx context.Context) (uint64, error) {
+			callCount++
+			if callCount == 1 {
+				return 10, nil
+			}
+			return 12, nil // 2 new blocks
+		},
+		GetBlockByNumberFn: func(ctx context.Context, blockNum uint64) (*rpc.Block, error) {
+			return &rpc.Block{
+				Number:   blockNum,
+				GasUsed:  100_000_000,
+				GasLimit: 1_000_000_000,
+			}, nil
+		},
+	}
+	lg := newTestLoadGenerator(t, WithL2Client(mock))
+	// Default config has BlockTimeMS=150
+	// estimatedTime = 2 * 150 / 1000 = 0.3s
+	// mgasPerSec = 200M / 1M / 0.3 = ~666.67
+
+	lg.getBlockMetricsViaRPC()
+	_, _, _, mgasPerSec, _ := lg.getBlockMetricsViaRPC()
+
+	// With BlockTimeMS=150: 2 blocks * 150ms = 0.3s, 200Mgas / 0.3s ≈ 666.67
+	if mgasPerSec < 600 || mgasPerSec > 750 {
+		t.Errorf("expected mgasPerSec ~666.67 with BlockTimeMS=150, got %f", mgasPerSec)
 	}
 }
