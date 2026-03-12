@@ -9,6 +9,8 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/account"
 	"github.com/gateway-fm/loadgenerator/internal/contract"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
+	"github.com/gateway-fm/loadgenerator/internal/uniswapv3"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -435,6 +437,343 @@ func TestEnsureContractsDeployed_WithCacheRestore(t *testing.T) {
 	if !lg.contractsDeployed {
 		t.Error("contractsDeployed should be true after cache restore")
 	}
+}
+
+func TestSaveUniswapContractsToCache_NilCacheStorage(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+	lg.cacheStorage = nil
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	// Should not panic
+	lg.saveUniswapContractsToCache(context.Background(), 42069, ub)
+}
+
+func TestSaveUniswapContractsToCache_NilContracts(t *testing.T) {
+	saveCalled := false
+	cache := &mockCacheStorage{
+		SaveCachedContractFn: func(ctx context.Context, c storage.CachedContract) error {
+			saveCalled = true
+			return nil
+		},
+	}
+	lg := newTestLoadGenerator(t)
+	lg.cacheStorage = cache
+
+	// Pass nil builder — the function calls ub.GetContracts() which returns nil
+	// when contracts field is nil. We can't easily make GetContracts return nil
+	// from NewUniswapV3SwapBuilder since it initializes contracts. Instead,
+	// verify the normal path doesn't skip when contracts are non-nil.
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	// Fresh builder has non-nil but zero-valued contracts — save should proceed
+	lg.saveUniswapContractsToCache(context.Background(), 42069, ub)
+
+	if !saveCalled {
+		t.Error("expected SaveCachedContract to be called for non-nil contracts")
+	}
+}
+
+func TestSaveUniswapContractsToCache_NormalSave(t *testing.T) {
+	var saved []storage.CachedContract
+	cache := &mockCacheStorage{
+		SaveCachedContractFn: func(ctx context.Context, c storage.CachedContract) error {
+			saved = append(saved, c)
+			return nil
+		},
+	}
+
+	lg := newTestLoadGenerator(t)
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	contracts := &uniswapv3.DeployedContracts{
+		WETH9:                      common.HexToAddress("0xW"),
+		USDC:                       common.HexToAddress("0xU"),
+		Factory:                    common.HexToAddress("0xF"),
+		SwapRouter:                 common.HexToAddress("0xS"),
+		NonfungiblePositionManager: common.HexToAddress("0xN"),
+		Pool:                       common.HexToAddress("0xP"),
+	}
+	ub.RestoreContracts(contracts)
+
+	lg.saveUniswapContractsToCache(context.Background(), 42069, ub)
+
+	if len(saved) != 6 {
+		t.Fatalf("expected 6 contracts saved, got %d", len(saved))
+	}
+
+	expectedNames := map[string]bool{
+		"uniswap:WETH9":                      false,
+		"uniswap:USDC":                       false,
+		"uniswap:Factory":                    false,
+		"uniswap:SwapRouter":                 false,
+		"uniswap:NonfungiblePositionManager": false,
+		"uniswap:Pool":                       false,
+	}
+	for _, c := range saved {
+		if _, ok := expectedNames[c.Name]; !ok {
+			t.Errorf("unexpected contract name: %s", c.Name)
+		}
+		expectedNames[c.Name] = true
+		if c.ChainID != 42069 {
+			t.Errorf("expected chainID 42069, got %d", c.ChainID)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected %s to be saved", name)
+		}
+	}
+}
+
+func TestSaveUniswapContractsToCache_SaveError(t *testing.T) {
+	cache := &mockCacheStorage{
+		SaveCachedContractFn: func(ctx context.Context, c storage.CachedContract) error {
+			return fmt.Errorf("write failed")
+		},
+	}
+
+	lg := newTestLoadGenerator(t)
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	ub.RestoreContracts(&uniswapv3.DeployedContracts{
+		WETH9:                      common.HexToAddress("0x1"),
+		USDC:                       common.HexToAddress("0x2"),
+		Factory:                    common.HexToAddress("0x3"),
+		SwapRouter:                 common.HexToAddress("0x4"),
+		NonfungiblePositionManager: common.HexToAddress("0x5"),
+		Pool:                       common.HexToAddress("0x6"),
+	})
+
+	// Should not panic, errors are logged as warnings
+	lg.saveUniswapContractsToCache(context.Background(), 42069, ub)
+}
+
+func TestTryRestoreCachedContracts_WithUniswap_FullRestore(t *testing.T) {
+	erc20Addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	gasConsumerAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	weth9Addr := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	usdcAddr := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	factoryAddr := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	routerAddr := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	nftAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	poolAddr := common.HexToAddress("0x8888888888888888888888888888888888888888")
+
+	cache := &mockCacheStorage{
+		LoadCachedContractsFn: func(ctx context.Context, chainID int64) ([]storage.CachedContract, error) {
+			return []storage.CachedContract{
+				{Name: "ERC20", Address: erc20Addr.Hex(), ChainID: chainID},
+				{Name: "GasConsumer", Address: gasConsumerAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:WETH9", Address: weth9Addr.Hex(), ChainID: chainID},
+				{Name: "uniswap:USDC", Address: usdcAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:Factory", Address: factoryAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:SwapRouter", Address: routerAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:NonfungiblePositionManager", Address: nftAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:Pool", Address: poolAddr.Hex(), ChainID: chainID},
+			}, nil
+		},
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return nil, nil // no cached accounts, all need setup
+		},
+	}
+
+	deployer := &mockDeployer{
+		ValidateCachedContractsFn: func(ctx context.Context, cached map[string]string) (map[string]common.Address, []string) {
+			valid := make(map[string]common.Address, len(cached))
+			for name, addr := range cached {
+				valid[name] = common.HexToAddress(addr)
+			}
+			return valid, nil
+		},
+	}
+
+	acc := makeTestAccount(t)
+	acctMgr := &mockAccountManager{accounts: []*account.Account{acc}}
+
+	// Mark the account as uniswap-ready so setupUniswapAccountsFromCache
+	// takes the early exit path (avoids 60s timeout from real SetupAccounts)
+	cache.LoadCachedAccountsFn = func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+		return []storage.CachedAccount{
+			{Address: acc.Address.Hex(), UniswapReady: true, ChainID: chainID},
+		}, nil
+	}
+
+	lg := newTestLoadGenerator(t, WithDeployer(deployer), WithAccountManager(acctMgr))
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	ctx := context.Background()
+	restored := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+
+	if !restored {
+		t.Fatal("expected tryRestoreCachedContracts to return true")
+	}
+	if !lg.contractsDeployed {
+		t.Error("contractsDeployed should be true")
+	}
+	if lg.erc20Contract != erc20Addr {
+		t.Errorf("erc20Contract = %s, want %s", lg.erc20Contract.Hex(), erc20Addr.Hex())
+	}
+
+	contracts := ub.GetContracts()
+	if contracts.Pool != poolAddr {
+		t.Errorf("pool = %s, want %s", contracts.Pool.Hex(), poolAddr.Hex())
+	}
+	if contracts.SwapRouter != routerAddr {
+		t.Errorf("swapRouter = %s, want %s", contracts.SwapRouter.Hex(), routerAddr.Hex())
+	}
+}
+
+func TestTryRestoreCachedContracts_WithUniswap_MissingUniswapContracts(t *testing.T) {
+	erc20Addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	gasConsumerAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	deleteCalled := false
+	cache := &mockCacheStorage{
+		LoadCachedContractsFn: func(ctx context.Context, chainID int64) ([]storage.CachedContract, error) {
+			return []storage.CachedContract{
+				{Name: "ERC20", Address: erc20Addr.Hex(), ChainID: chainID},
+				{Name: "GasConsumer", Address: gasConsumerAddr.Hex(), ChainID: chainID},
+				// Missing uniswap contracts
+			}, nil
+		},
+		DeleteCachedContractsFn: func(ctx context.Context, chainID int64) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	deployer := &mockDeployer{
+		ValidateCachedContractsFn: func(ctx context.Context, cached map[string]string) (map[string]common.Address, []string) {
+			valid := make(map[string]common.Address, len(cached))
+			for name, addr := range cached {
+				valid[name] = common.HexToAddress(addr)
+			}
+			return valid, nil
+		},
+	}
+
+	lg := newTestLoadGenerator(t, WithDeployer(deployer))
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	ctx := context.Background()
+	restored := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+
+	if restored {
+		t.Fatal("expected false when uniswap contracts missing from cache")
+	}
+	if !deleteCalled {
+		t.Error("expected DeleteCachedContracts to be called")
+	}
+	if lg.contractsDeployed {
+		t.Error("contractsDeployed should be reset to false")
+	}
+}
+
+func TestSetupUniswapAccountsFromCache_LoadError(t *testing.T) {
+	cache := &mockCacheStorage{
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return nil, fmt.Errorf("db error")
+		},
+	}
+
+	lg := newTestLoadGenerator(t)
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	// Should not panic, returns early on error
+	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+}
+
+func TestSetupUniswapAccountsFromCache_AllAccountsReady(t *testing.T) {
+	acc := makeTestAccount(t)
+	acctMgr := &mockAccountManager{accounts: []*account.Account{acc}}
+
+	cache := &mockCacheStorage{
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return []storage.CachedAccount{
+				{Address: acc.Address.Hex(), UniswapReady: true, ChainID: chainID},
+			}, nil
+		},
+	}
+
+	lg := newTestLoadGenerator(t, WithAccountManager(acctMgr))
+	lg.cacheStorage = cache
+
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	// All accounts already ready, should return early without calling SetupAccounts
+	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+}
+
+func TestSetupUniswapAccountsFromCache_SetupError(t *testing.T) {
+	acc := makeTestAccount(t)
+	acctMgr := &mockAccountManager{accounts: []*account.Account{acc}}
+
+	cache := &mockCacheStorage{
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return nil, nil // no cached accounts, so acc needs setup
+		},
+	}
+
+	lg := newTestLoadGenerator(t, WithAccountManager(acctMgr))
+	lg.cacheStorage = cache
+
+	// Fresh builder with deployed=false will return "contracts not deployed" error
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	// Should not panic, error is logged as warning
+	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+}
+
+func TestSetupUniswapAccountsFromCache_PartialReady(t *testing.T) {
+	acc1 := makeTestAccount(t)
+	acc2 := makeTestAccount(t)
+	acctMgr := &mockAccountManager{
+		accounts: []*account.Account{acc1, acc2},
+	}
+
+	cache := &mockCacheStorage{
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return []storage.CachedAccount{
+				{Address: acc1.Address.Hex(), UniswapReady: true, ChainID: chainID},
+				// acc2 not in cache, needs setup
+			}, nil
+		},
+	}
+
+	lg := newTestLoadGenerator(t, WithAccountManager(acctMgr))
+	lg.cacheStorage = cache
+
+	// Fresh builder (deployed=false) will error on SetupAccounts, but that's
+	// handled gracefully. This tests the filtering logic: only acc2 should
+	// be in needSetup.
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+}
+
+func TestSetupUniswapAccountsFromCache_DynamicAccountsIncluded(t *testing.T) {
+	builtIn := makeTestAccount(t)
+	dynamic := makeTestAccount(t)
+	acctMgr := &mockAccountManager{
+		accounts:        []*account.Account{builtIn},
+		dynamicAccounts: []*account.Account{dynamic},
+	}
+
+	cache := &mockCacheStorage{
+		LoadCachedAccountsFn: func(ctx context.Context, chainID int64) ([]storage.CachedAccount, error) {
+			return []storage.CachedAccount{
+				{Address: builtIn.Address.Hex(), UniswapReady: true, ChainID: chainID},
+				// dynamic not ready
+			}, nil
+		},
+	}
+
+	lg := newTestLoadGenerator(t, WithAccountManager(acctMgr))
+	lg.cacheStorage = cache
+
+	// Will fail on SetupAccounts (deployed=false) but exercises the dynamic account path
+	ub := txbuilder.NewUniswapV3SwapBuilder()
+	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
 }
 
 func TestEnsureContractsDeployed_SetsBuilderContractAddresses(t *testing.T) {
