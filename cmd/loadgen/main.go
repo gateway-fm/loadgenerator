@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -68,13 +69,27 @@ func main() {
 	defer store.Close()
 	logger.Info("initialized storage", "path", *databasePath)
 
+	// Gas pricing: env vars override flag defaults for gasless mode support
+	gasTipCap := *gasPrice // Default: use gasPrice as tip cap
+	var gasFeeCap int64    // 0 = auto-calculate from chain
+	if v := os.Getenv("GAS_TIP_CAP"); v != "" {
+		if tip, err := strconv.ParseInt(v, 10, 64); err == nil && tip >= 0 {
+			gasTipCap = tip
+		}
+	}
+	if v := os.Getenv("GAS_FEE_CAP"); v != "" {
+		if fee, err := strconv.ParseInt(v, 10, 64); err == nil && fee >= 0 {
+			gasFeeCap = fee
+		}
+	}
 	cfg := &config.Config{
 		BuilderRPCURL:  *builderURL,
 		L2RPCURL:       *l2URL,
 		PreconfWSURL:   *preconfWS,
 		ChainID:        *chainID,
 		GasPrice:       *gasPrice,
-		GasTipCap:      *gasPrice,
+		GasTipCap:      gasTipCap,
+		GasFeeCap:      gasFeeCap,
 		GasLimit:       *gasLimit,
 		ListenAddr:     *listenAddr,
 		DatabasePath:   *databasePath,

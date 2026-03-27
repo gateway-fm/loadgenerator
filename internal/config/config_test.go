@@ -227,12 +227,23 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "zero gas tip cap",
+			name: "zero gas tip cap (gasless mode)",
 			config: Config{
 				BuilderRPCURL: "http://localhost:13000",
 				L2RPCURL:      "http://localhost:8545",
 				ChainID:       42069,
 				GasTipCap:     0,
+				GasLimit:      21000,
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative gas tip cap",
+			config: Config{
+				BuilderRPCURL: "http://localhost:13000",
+				L2RPCURL:      "http://localhost:8545",
+				ChainID:       42069,
+				GasTipCap:     -1,
 				GasLimit:      21000,
 			},
 			wantErr: true,
