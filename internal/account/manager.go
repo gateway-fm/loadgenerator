@@ -34,6 +34,16 @@ type Manager struct {
 	logger    *slog.Logger
 }
 
+func isNonceConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "nonce too low") ||
+		strings.Contains(msg, "already known") ||
+		strings.Contains(msg, "could not replace existing tx")
+}
+
 // NewManager creates a new account manager.
 // useLegacy controls whether funding transactions use legacy (type 0) format.
 func NewManager(chainID, gasPrice *big.Int, useLegacy bool, logger *slog.Logger) (*Manager, error) {
@@ -71,11 +81,10 @@ func (m *Manager) GetAccountsFunded() int {
 }
 
 // InitializeNonces fetches initial nonces for the built-in accounts in parallel.
-// CRITICAL: Uses Resync to sync through builder (eth_getPendingNonce), ensuring
-// load generator and builder have the same nonce view. This prevents "nonce ahead"
-// errors when builder has cached nonces from previous tests.
+// Uses pending nonce from the active tx endpoint so local nonce tracking starts
+// from the same view used for transaction submission.
 func (m *Manager) InitializeNonces(ctx context.Context, client rpc.Client, numAccounts int) error {
-	m.logger.Info("Initializing account nonces (parallel, through builder)...", slog.Int("count", numAccounts))
+	m.logger.Info("Initializing account nonces (parallel, pending view)...", slog.Int("count", numAccounts))
 
 	count := numAccounts
 	if count > len(m.accounts) {
@@ -121,12 +130,10 @@ func (m *Manager) InitializeNonces(ctx context.Context, client rpc.Client, numAc
 }
 
 // InitializeDynamicNonces fetches initial nonces for dynamic accounts in parallel.
-// CRITICAL: Uses Resync to sync through builder (eth_getPendingNonce), which also
-// populates the builder's nonce cache for these new accounts. This prevents cache
-// misses and RPC delays when the test starts.
+// Uses pending nonce from the active tx endpoint to align local sender state.
 func (m *Manager) InitializeDynamicNonces(ctx context.Context, client rpc.Client) error {
 	count := len(m.dynamicAccounts)
-	m.logger.Info("Initializing nonces for dynamic accounts (parallel, through builder)",
+	m.logger.Info("Initializing nonces for dynamic accounts (parallel, pending view)",
 		slog.Int("count", count),
 	)
 
@@ -235,9 +242,9 @@ func (m *Manager) GenerateDynamicAccounts(count int) error {
 
 // FundDynamicAccounts funds all dynamic accounts using faucets in parallel.
 // Reserves accounts[0] for contract deployment (not used as faucet).
-// Each faucet sends transactions rapidly (no delays). The builder handles nonce ordering.
-// sendClient is used for sending transactions (should be builder client).
-// syncClient is used for nonce sync (should be L2 client for confirmed chain state).
+// Each faucet sends transactions rapidly (no delays).
+// sendClient is used for transaction submission (builder or direct node).
+// syncClient is used for confirmed nonce checks (L2 chain state).
 // IMPORTANT: This function now waits for all funding transactions to be confirmed before returning.
 func (m *Manager) FundDynamicAccounts(ctx context.Context, sendClient, syncClient rpc.Client) error {
 	if len(m.dynamicAccounts) == 0 {
@@ -259,17 +266,13 @@ func (m *Manager) FundDynamicAccounts(ctx context.Context, sendClient, syncClien
 		slog.String("note", "accounts[0] reserved for deployment"),
 	)
 
-	// CRITICAL: Sync faucet nonces THROUGH the builder (not directly from chain!)
-	// This ensures load generator and builder have the same nonce view, preventing
-	// "nonce ahead" errors when builder has cached nonces from previous tests.
-	// Using sendClient (builder) queries eth_getPendingNonce which either:
-	// - Returns cached nonce (ensuring we match builder's expectation)
-	// - Or queries chain, caches result, and returns (ensuring we're in sync)
+	// Sync faucet nonces from the same endpoint used for transaction submission.
+	// This keeps local nonce tracking aligned with the sender path.
 	startingNonces := make([]uint64, numFaucets)
 	for i := 0; i < numFaucets; i++ {
 		faucet := m.accounts[i+1]
 		if err := faucet.Resync(ctx, sendClient); err != nil {
-			return fmt.Errorf("resync faucet %d from builder: %w", i+1, err)
+			return fmt.Errorf("resync faucet %d from tx endpoint: %w", i+1, err)
 		}
 		startingNonces[i] = faucet.PeekNonce()
 	}
@@ -296,6 +299,22 @@ func (m *Manager) FundDynamicAccounts(ctx context.Context, sendClient, syncClien
 
 				// Simple send - no retry, no delay
 				if err := m.fundAccountFast(ctx, sendClient, faucet, acc, signer, fundAmount); err != nil {
+					// Direct sequencers can reject stale nonces after restarts or pool drift.
+					// Resync once and retry this account before giving up.
+					if isNonceConflictError(err) {
+						if syncErr := faucet.Resync(ctx, sendClient); syncErr == nil {
+							if retryErr := m.fundAccountFast(ctx, sendClient, faucet, acc, signer, fundAmount); retryErr == nil {
+								funded := atomic.AddInt32(&m.accountsFunded, 1)
+								if funded%500 == 0 {
+									m.logger.Info("Funding progress (sent)",
+										slog.Int("sent", int(funded)),
+										slog.Int("total", len(m.dynamicAccounts)),
+									)
+								}
+								continue
+							}
+						}
+					}
 					m.logger.Warn("Failed to fund account",
 						slog.Int("idx", i),
 						slog.Int("faucet", fIdx+1),
@@ -367,17 +386,13 @@ func (m *Manager) FundDynamicAccounts(ctx context.Context, sendClient, syncClien
 
 // waitForNonceConfirmation waits until the faucet's nonce reaches the expected value.
 // Uses GetConfirmedNonce (eth_getTransactionCount with "latest") to check ACTUAL on-chain confirmation.
-// IMPORTANT: Do NOT use GetNonce here - it goes through eth_getPendingNonce which returns
-// the builder's view, not the actual confirmed chain state.
+// IMPORTANT: Do NOT use GetNonce here - pending nonce may include mempool state.
 func (m *Manager) waitForNonceConfirmation(ctx context.Context, client rpc.Client, faucet *Account, expectedNonce uint64, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	pollInterval := 500 * time.Millisecond
 
 	for time.Now().Before(deadline) {
-		// CRITICAL: Use GetConfirmedNonce to check ACTUAL on-chain state
-		// GetNonce uses eth_getPendingNonce which returns builder's cached view,
-		// not the confirmed chain state. This caused false positives where we thought
-		// TXs were confirmed but they were only queued in the builder.
+		// CRITICAL: Use GetConfirmedNonce to check ACTUAL on-chain state.
 		onChainNonce, err := client.GetConfirmedNonce(ctx, faucet.Address.Hex())
 		if err != nil {
 			return fmt.Errorf("get confirmed nonce: %w", err)
@@ -474,7 +489,7 @@ func (m *Manager) fundDynamicAccountsParallel(ctx context.Context, client rpc.Cl
 }
 
 // fundAccountFast funds a single account - no retries, no delays.
-// Just reserve nonce, sign, send, commit. Trust the builder.
+// Just reserve nonce, sign, send, commit via the active tx endpoint.
 func (m *Manager) fundAccountFast(
 	ctx context.Context,
 	client rpc.Client,
@@ -701,12 +716,12 @@ func (m *Manager) FundAccounts(ctx context.Context, sendClient, syncClient rpc.C
 		slog.Int("faucets", numFaucets),
 	)
 
-	// Sync faucet nonces through builder
+	// Sync faucet nonces from the tx submission endpoint.
 	startingNonces := make([]uint64, numFaucets)
 	for i := 0; i < numFaucets; i++ {
 		faucet := m.accounts[i+1]
 		if err := faucet.Resync(ctx, sendClient); err != nil {
-			return fmt.Errorf("resync faucet %d from builder: %w", i+1, err)
+			return fmt.Errorf("resync faucet %d from tx endpoint: %w", i+1, err)
 		}
 		startingNonces[i] = faucet.PeekNonce()
 	}
@@ -727,6 +742,14 @@ func (m *Manager) FundAccounts(ctx context.Context, sendClient, syncClient rpc.C
 			for i := fIdx; i < len(accounts); i += numFaucets {
 				acc := accounts[i]
 				if err := m.fundAccountFast(ctx, sendClient, faucet, acc, signer, fundAmount); err != nil {
+					if isNonceConflictError(err) {
+						if syncErr := faucet.Resync(ctx, sendClient); syncErr == nil {
+							if retryErr := m.fundAccountFast(ctx, sendClient, faucet, acc, signer, fundAmount); retryErr == nil {
+								fundedCount.Add(1)
+								continue
+							}
+						}
+					}
 					m.logger.Warn("Failed to fund account",
 						slog.Int("idx", i),
 						slog.Int("faucet", fIdx+1),
@@ -872,8 +895,8 @@ func (m *Manager) recycleAccountFunds(
 
 	// Calculate amount to send (balance - gas cost)
 	gasLimit := uint64(21000)
-	gasTip := big.NewInt(1 * 1e9)   // 1 gwei tip
-	maxFee := big.NewInt(10 * 1e9)  // 10 gwei max fee
+	gasTip := big.NewInt(1 * 1e9)  // 1 gwei tip
+	maxFee := big.NewInt(10 * 1e9) // 10 gwei max fee
 	gasCost := new(big.Int).Mul(maxFee, big.NewInt(int64(gasLimit)))
 
 	// Skip if balance is too low to cover gas

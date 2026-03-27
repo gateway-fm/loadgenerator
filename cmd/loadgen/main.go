@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -52,6 +54,7 @@ type LoadGenerator struct {
 	cfg           *config.Config
 	builderClient rpc.Client
 	l2Client      rpc.Client
+	txClient      rpc.Client
 	accountMgr    *account.Manager
 	patternReg    *pattern.Registry
 	txBuilderReg  *txbuilder.Registry
@@ -107,6 +110,9 @@ type LoadGenerator struct {
 	txLogBuf      []storage.TxLogEntry
 	txLogBufMu    sync.Mutex
 	pendingTxs    sync.Map // common.Hash -> *storage.TxLogEntry (uses [32]byte key, avoids hex string alloc)
+	// Last computed on-chain tx count from post-test verification (used as fallback
+	// for execution layers without preconfirmation-based confirmation events).
+	lastOnChainTxCount uint64 // atomic
 
 	// Timing
 	startTime       time.Time
@@ -256,6 +262,14 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	l2Cfg.Logger = logger
 	l2Client := rpc.NewHTTPClient(l2Cfg)
 
+	// Select the RPC endpoint used for tx submission and pending-nonce view.
+	// With external builder: send via builder.
+	// Without external builder (cdk-erigon/gravity-reth): send directly to L2 RPC.
+	txClient := l2Client
+	if cfg.Capabilities != nil && cfg.Capabilities.HasExternalBlockBuilder {
+		txClient = builderClient
+	}
+
 	// Create account manager
 	useLegacy := cfg.Capabilities != nil && cfg.Capabilities.RequiresLegacyTx
 	accountMgr, err := account.NewManager(chainID, gasPrice, useLegacy, logger)
@@ -277,14 +291,14 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	metricsCol := metrics.NewInMemoryCollector(true)
 
 	// Create contract deployer
-	deployer := contract.NewDeployer(builderClient, chainID, gasPrice, logger)
+	deployer := contract.NewDeployer(txClient, chainID, gasPrice, logger)
 	deployer.SetUseLegacy(useLegacy)
 
 	// Create async sender with backpressure
 	// Concurrency must be high enough to saturate target TPS:
 	// required = target_tps × avg_rpc_latency_sec (e.g., 30k × 0.02 = 600 minimum)
 	snd := sender.New(sender.Config{
-		Client:      builderClient,
+		Client:      txClient,
 		Concurrency: 2000, // Max concurrent in-flight sends
 		Logger:      logger,
 	})
@@ -293,6 +307,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		cfg:              cfg,
 		builderClient:    builderClient,
 		l2Client:         l2Client,
+		txClient:         txClient,
 		accountMgr:       accountMgr,
 		patternReg:       patternReg,
 		txBuilderReg:     txBuilderReg,
@@ -614,7 +629,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			fundCtx, fundCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer fundCancel()
 
-			if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.builderClient, lg.l2Client); err != nil {
+			if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.txClient, lg.l2Client); err != nil {
 				lg.logger.Warn("failed to fund some dynamic accounts", "error", err)
 			}
 			lg.initFundingSent = lg.accountMgr.GetAccountsFunded()
@@ -639,7 +654,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 
 			lg.initPhase = types.InitPhaseInitNonces
 			lg.initProgress = "Initializing nonces for dynamic accounts..."
-			if err := lg.accountMgr.InitializeDynamicNonces(fundCtx, lg.builderClient); err != nil {
+			if err := lg.accountMgr.InitializeDynamicNonces(fundCtx, lg.txClient); err != nil {
 				lg.logger.Warn("failed to initialize dynamic nonces", "error", err)
 			}
 
@@ -653,16 +668,24 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	lg.initProgress = "Initializing nonces for built-in accounts..."
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// CRITICAL: Use builderClient to sync through builder (eth_getPendingNonce)
-	// This ensures load generator and builder have the same nonce view, preventing
-	// "nonce ahead" errors when builder has cached nonces from previous tests
-	if err := lg.accountMgr.InitializeNonces(ctx, lg.builderClient, min(numAccounts, len(accounts))); err != nil {
+	// Initialize account nonces from the active tx endpoint:
+	// - external-builder mode: builder pending view
+	// - direct-node mode: node pending view
+	if err := lg.accountMgr.InitializeNonces(ctx, lg.txClient, min(numAccounts, len(accounts))); err != nil {
 		lg.setError(fmt.Sprintf("failed to initialize nonces: %v", err))
 		return
 	}
 
 	// Set up EIP-1559 gas pricing
-	lg.gasTipCap = big.NewInt(lg.cfg.GasTipCap)
+	tipCapWei := lg.cfg.GasTipCap
+	if tipCapWei < 0 {
+		tipCapWei = 1_000_000_000 // 1 gwei safety floor
+		lg.logger.Warn("negative gas tip cap configured, using fallback",
+			"configuredTipWei", lg.cfg.GasTipCap,
+			"fallbackTipWei", tipCapWei,
+		)
+	}
+	lg.gasTipCap = big.NewInt(tipCapWei)
 	if lg.cfg.GasFeeCap > 0 {
 		// Explicit fee cap configured
 		lg.gasFeeCap = big.NewInt(lg.cfg.GasFeeCap)
@@ -703,6 +726,18 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			"gasFeeCap", lg.gasFeeCap,
 			"baseFeeError", err,
 		)
+	}
+
+	// Keep fee cap non-negative.
+	if lg.gasFeeCap == nil || lg.gasFeeCap.Sign() < 0 {
+		fallbackFeeCap := new(big.Int).Mul(lg.gasTipCap, big.NewInt(2))
+		if fallbackFeeCap.Sign() < 0 {
+			fallbackFeeCap = big.NewInt(0) // gasless floor
+		}
+		lg.logger.Warn("negative gasFeeCap resolved, applying fallback",
+			"fallbackFeeCapWei", fallbackFeeCap.String(),
+		)
+		lg.gasFeeCap = fallbackFeeCap
 	}
 
 	// Deploy contracts if needed for non-ETH-transfer types
@@ -938,9 +973,11 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		go lg.adaptiveController()
 	}
 
-	// Start backpressure monitor to check block builder status
-	lg.wg.Add(1)
-	go lg.backpressureMonitor()
+	// Start backpressure monitor only when external builder status API is available.
+	if lg.cfg.Capabilities != nil && lg.cfg.Capabilities.SupportsBuilderStatusAPI {
+		lg.wg.Add(1)
+		go lg.backpressureMonitor()
+	}
 
 	// Start completion watcher (NOT in WaitGroup because it calls StopTest which waits on wg)
 	go lg.completionWatcher()
@@ -1199,6 +1236,7 @@ func (lg *LoadGenerator) Reset() {
 		lg.pendingTxs.Delete(key)
 		return true
 	})
+	atomic.StoreUint64(&lg.lastOnChainTxCount, 0)
 
 	lg.logger.Info("test reset")
 }
@@ -1213,7 +1251,7 @@ func (lg *LoadGenerator) RecycleFunds() (int, error) {
 		return 0, fmt.Errorf("cannot recycle funds while test is running")
 	}
 
-	return lg.accountMgr.RecycleFunds(context.Background(), lg.builderClient)
+	return lg.accountMgr.RecycleFunds(context.Background(), lg.txClient)
 }
 
 // GetMetrics returns current test metrics.
@@ -1320,6 +1358,15 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		HSMProvider:             hsmProvider,
 		HSMKeyIDActive:          hsmKeyIDActive,
 		HSMFailoverEnabled:      hsmFailoverEnabled,
+	}
+
+	// In direct-node modes (no preconf confirmation stream), txConfirmed can remain 0
+	// even when transactions are included on-chain. Surface verified on-chain count.
+	if status != types.StatusRunning && result.TxConfirmed == 0 {
+		onChainConfirmed := atomic.LoadUint64(&lg.lastOnChainTxCount)
+		if onChainConfirmed > 0 {
+			result.TxConfirmed = onChainConfirmed
+		}
 	}
 
 	// Include TX flow stats if available
@@ -1456,6 +1503,9 @@ func (lg *LoadGenerator) CheckL2RPC() error {
 
 // CheckBuilderRPC checks builder RPC connectivity.
 func (lg *LoadGenerator) CheckBuilderRPC() error {
+	if lg.cfg.Capabilities != nil && !lg.cfg.Capabilities.HasExternalBlockBuilder {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := lg.builderClient.GetBlockNumber(ctx)
@@ -1690,8 +1740,11 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				txType = lg.currentTxType
 			}
 
-			// Calculate gas fee cap based on tip
+			// Calculate gas fee cap based on tip.
 			gasFeeCap := new(big.Int).Add(tipWei, lg.gasFeeCap)
+			if gasFeeCap.Sign() < 0 {
+				gasFeeCap = big.NewInt(0) // floor at zero (gasless mode)
+			}
 
 			// Build transaction (EIP-1559 or legacy depending on execution layer)
 			tx, err := builder.Build(txbuilder.TxParams{
@@ -2117,13 +2170,11 @@ func (lg *LoadGenerator) completionWatcher() {
 	}
 }
 
-// resyncAllNonces resyncs nonces for all accounts from the chain.
+// resyncAllNonces resyncs nonces for all accounts from the active tx endpoint.
 // Called when circuit breaker opens due to high revocation rate.
-// Uses builderClient to query pending nonces from the block builder (via eth_getPendingNonce).
-// This ensures load generator stays in sync with the builder's view of nonces.
-// Falls back to l2Client (chain "latest") if builder is unavailable.
+// Falls back to l2Client confirmed state if pending nonce lookup fails.
 func (lg *LoadGenerator) resyncAllNonces() {
-	lg.logger.Info("resyncing all account nonces from builder...")
+	lg.logger.Info("resyncing all account nonces from active tx endpoint...")
 
 	accounts := lg.accountMgr.GetAccounts()
 	resyncedCount := 0
@@ -2133,13 +2184,10 @@ func (lg *LoadGenerator) resyncAllNonces() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Use builderClient to get pending nonces (via eth_getPendingNonce) - ensures sync with builder
-	// Falls back to l2Client (chain confirmed) if builder is unavailable
+	// Use active tx endpoint pending nonce; fall back to confirmed chain nonce.
 	for _, acc := range accounts {
-		// First try builder's view (preferred - stays in sync)
-		if err := acc.Resync(ctx, lg.builderClient); err != nil {
-			// Builder failed - fall back to chain confirmed nonce
-			lg.logger.Debug("builder nonce failed, falling back to chain",
+		if err := acc.Resync(ctx, lg.txClient); err != nil {
+			lg.logger.Debug("pending nonce lookup failed, falling back to confirmed chain nonce",
 				"address", acc.Address.Hex()[:10],
 				"error", err)
 			if err := acc.ResyncFromChain(ctx, lg.l2Client); err != nil {
@@ -2994,6 +3042,12 @@ func (lg *LoadGenerator) connectL2WS() {
 		} else if len(wsURL) > 8 && wsURL[:8] == "https://" {
 			wsURL = "wss://" + wsURL[8:]
 		}
+
+		// Common Ethereum setup exposes WS on 8546 when HTTP is on 8545.
+		if parsed, err := url.Parse(wsURL); err == nil && parsed.Port() == "8545" {
+			parsed.Host = net.JoinHostPort(parsed.Hostname(), "8546")
+			wsURL = parsed.String()
+		}
 	}
 
 	lg.l2WsConnMu.Lock()
@@ -3718,7 +3772,7 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 			lg.statusMu.Unlock()
 		}
 
-		if err := uniswapBuilder.DeployContractsWithProgress(ctx, lg.builderClient, deployerAcc, chainID, gasPrice, lg.logger, uniswapProgress); err != nil {
+		if err := uniswapBuilder.DeployContractsWithProgress(ctx, lg.txClient, deployerAcc, chainID, gasPrice, lg.logger, uniswapProgress); err != nil {
 			return fmt.Errorf("failed to deploy Uniswap V3 contracts: %w", err)
 		}
 
@@ -3733,7 +3787,7 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		for _, acc := range dynamicAccounts {
 			allAccounts = append(allAccounts, acc)
 		}
-		if err := uniswapBuilder.SetupAccounts(ctx, allAccounts, lg.builderClient, chainID, gasPrice); err != nil {
+		if err := uniswapBuilder.SetupAccounts(ctx, allAccounts, lg.txClient, chainID, gasPrice); err != nil {
 			return fmt.Errorf("failed to setup accounts for Uniswap: %w", err)
 		}
 
@@ -3949,7 +4003,7 @@ func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chai
 
 	bigChainID := big.NewInt(lg.cfg.ChainID)
 	gasPrice := big.NewInt(lg.cfg.GasPrice)
-	if err := uniswapBuilder.SetupAccounts(ctx, needSetup, lg.builderClient, bigChainID, gasPrice); err != nil {
+	if err := uniswapBuilder.SetupAccounts(ctx, needSetup, lg.txClient, bigChainID, gasPrice); err != nil {
 		lg.logger.Warn("failed to setup accounts for Uniswap", "error", err)
 		return
 	}
@@ -4094,7 +4148,7 @@ func (lg *LoadGenerator) tryWarmStartAccounts(dynamicCount int, chainID int64) b
 					return false
 				}
 
-				if err := lg.accountMgr.FundAccounts(ctx, lg.builderClient, lg.l2Client, toRefund); err != nil {
+				if err := lg.accountMgr.FundAccounts(ctx, lg.txClient, lg.l2Client, toRefund); err != nil {
 					lg.logger.Warn("failed to re-fund cached accounts", "error", err)
 				} else {
 					allAccounts = append(allAccounts, toRefund...)
@@ -4121,7 +4175,7 @@ func (lg *LoadGenerator) tryWarmStartAccounts(dynamicCount int, chainID int64) b
 					lg.logger.Warn("failed to reset builder nonces", "error", err)
 				}
 
-				if err := lg.accountMgr.FundDynamicAccounts(ctx, lg.builderClient, lg.l2Client); err != nil {
+				if err := lg.accountMgr.FundDynamicAccounts(ctx, lg.txClient, lg.l2Client); err != nil {
 					lg.logger.Warn("failed to fund new accounts", "error", err)
 				}
 
@@ -4138,7 +4192,7 @@ func (lg *LoadGenerator) tryWarmStartAccounts(dynamicCount int, chainID int64) b
 	// Init nonces for cached accounts
 	lg.initPhase = types.InitPhaseInitNonces
 	lg.initProgress = "Initializing nonces for cached accounts..."
-	if err := lg.accountMgr.InitializeDynamicNonces(ctx, lg.builderClient); err != nil {
+	if err := lg.accountMgr.InitializeDynamicNonces(ctx, lg.txClient); err != nil {
 		lg.logger.Warn("failed to initialize cached account nonces", "error", err)
 	}
 
@@ -4295,6 +4349,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 
 	// Get on-chain verification metrics by querying blocks
 	onChainMetrics := lg.calculateOnChainMetrics(ctx)
+	atomic.StoreUint64(&lg.lastOnChainTxCount, onChainMetrics.txCount)
 
 	// Fallback: If time series block metrics are all 0 (WebSocket failed), use on-chain metrics
 	if totalBlocks == 0 && totalGasUsed == 0 && onChainMetrics.firstBlock > 0 && onChainMetrics.lastBlock >= onChainMetrics.firstBlock {
@@ -4324,6 +4379,11 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 	// Compare on-chain tx count against txSent - the on-chain blocks contain all TXs we sent,
 	// including those that were "pending" from our tracking perspective (confirmation notification
 	// not yet received when test stopped). If we sent N TXs and on-chain shows N, that's a match.
+	confirmedForVerification := snapshot.TxConfirmed
+	if onChainMetrics.txCount > confirmedForVerification {
+		confirmedForVerification = onChainMetrics.txCount
+	}
+
 	var verificationResult *storage.VerificationResult
 	if lg.l2Client != nil {
 		// Check if we have incremental verification snapshots
@@ -4341,7 +4401,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 			lg.logger.Info("using incremental verification",
 				"snapshots", len(incrementalSnapshots),
 				"onChainTxCount", onChainMetrics.txCount,
-				"txConfirmed", snapshot.TxConfirmed)
+				"txConfirmed", confirmedForVerification)
 
 			// Update progress - aggregating incremental snapshots
 			lg.statusMu.Lock()
@@ -4355,7 +4415,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 			verificationResult = verifier.AggregateSnapshots(
 				incrementalSnapshots,
 				onChainMetrics.txCount,
-				snapshot.TxConfirmed,
+				confirmedForVerification,
 				txOrdering,
 			)
 
@@ -4384,7 +4444,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 			verificationResult = verifier.VerifyTestResultsWithProgress(
 				ctx,
 				onChainMetrics.txCount,
-				snapshot.TxConfirmed,
+				confirmedForVerification,
 				onChainMetrics.firstBlock,
 				onChainMetrics.lastBlock,
 				txOrdering,
@@ -4413,7 +4473,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 	testRun := &storage.TestRun{
 		ID:             lg.currentTestID,
 		TxSent:         snapshot.TxSent,
-		TxConfirmed:    snapshot.TxConfirmed,
+		TxConfirmed:    confirmedForVerification,
 		TxFailed:       snapshot.TxFailed,
 		TxDiscarded:    lg.discardedCount,
 		AverageTPS:     avgTPS,
@@ -4818,13 +4878,26 @@ func main() {
 	logger.Info("initialized storage", "path", *databasePath)
 
 	// Build config
+	gasTipCap := *gasPrice // Default: use gasPrice as tip cap for EIP-1559 compatibility
+	var gasFeeCap int64    // 0 = auto-calculate from chain
+	if v := os.Getenv("GAS_TIP_CAP"); v != "" {
+		if tip, err := strconv.ParseInt(v, 10, 64); err == nil && tip >= 0 {
+			gasTipCap = tip
+		}
+	}
+	if v := os.Getenv("GAS_FEE_CAP"); v != "" {
+		if fee, err := strconv.ParseInt(v, 10, 64); err == nil && fee >= 0 {
+			gasFeeCap = fee
+		}
+	}
 	cfg := &config.Config{
 		BuilderRPCURL:  *builderURL,
 		L2RPCURL:       *l2URL,
 		PreconfWSURL:   *preconfWS,
 		ChainID:        *chainID,
 		GasPrice:       *gasPrice,
-		GasTipCap:      *gasPrice, // Use gasPrice as tip cap for EIP-1559 compatibility
+		GasTipCap:      gasTipCap,
+		GasFeeCap:      gasFeeCap,
 		GasLimit:       *gasLimit,
 		ListenAddr:     *listenAddr,
 		DatabasePath:   *databasePath,

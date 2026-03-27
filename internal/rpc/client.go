@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -169,8 +171,8 @@ type ClientConfig struct {
 func DefaultClientConfig(url string) ClientConfig {
 	return ClientConfig{
 		URL:            url,
-		Timeout:        2 * time.Second,  // Increased from 500ms - more resilient under load
-		MaxRetries:     3,                // Increased from 1 - handle transient failures
+		Timeout:        2 * time.Second, // Increased from 500ms - more resilient under load
+		MaxRetries:     3,               // Increased from 1 - handle transient failures
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     500 * time.Millisecond,
 	}
@@ -184,6 +186,8 @@ type HTTPClient struct {
 	backoff    time.Duration
 	maxBackoff time.Duration
 	logger     *slog.Logger
+	// 0=unknown, 1=supported, -1=unsupported
+	supportsPendingNonce int32
 }
 
 // NewHTTPClient creates a new HTTP-based RPC client.
@@ -348,6 +352,20 @@ func isRPCError(err error) bool {
 	return ok
 }
 
+func isMethodNotFoundRPCError(err error) bool {
+	rpcErr, ok := err.(*RPCError)
+	if !ok {
+		return false
+	}
+	if rpcErr.Code == -32601 {
+		return true
+	}
+	msg := strings.ToLower(rpcErr.Message)
+	return strings.Contains(msg, "method not found") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "not available")
+}
+
 // HTTPStatusError represents an HTTP-level error (non-2xx status).
 type HTTPStatusError struct {
 	StatusCode int
@@ -427,19 +445,29 @@ func (c *HTTPClient) SendRawTransactionBatch(ctx context.Context, txRLPs [][]byt
 // First tries eth_getPendingNonce (block builder's cached nonces) for better sync,
 // falls back to eth_getTransactionCount with "pending" to include mempool transactions.
 func (c *HTTPClient) GetNonce(ctx context.Context, address string) (uint64, error) {
-	// Try the builder's pending nonce first (ensures load generator and builder are in sync)
-	result, err := c.Call(ctx, "eth_getPendingNonce", []interface{}{address})
-	if err == nil {
-		var nonceHex string
-		if err := json.Unmarshal(result, &nonceHex); err == nil {
-			return hexutil.MustDecodeUint64(nonceHex), nil
+	// eth_getPendingNonce is non-standard. Try it only while support is unknown/confirmed.
+	// Once unsupported is detected, skip it and use standard eth_getTransactionCount("pending").
+	if atomic.LoadInt32(&c.supportsPendingNonce) != -1 {
+		result, err := c.Call(ctx, "eth_getPendingNonce", []interface{}{address})
+		if err == nil {
+			var nonceHex string
+			if err := json.Unmarshal(result, &nonceHex); err == nil {
+				nonce, err := hexutil.DecodeUint64(nonceHex)
+				if err != nil {
+					return 0, fmt.Errorf("failed to decode nonce: %w", err)
+				}
+				atomic.StoreInt32(&c.supportsPendingNonce, 1)
+				return nonce, nil
+			}
+		} else if isMethodNotFoundRPCError(err) {
+			atomic.StoreInt32(&c.supportsPendingNonce, -1)
 		}
 	}
 
 	// Fall back to standard nonce query with "pending" to include mempool transactions.
 	// Using "pending" is critical for high-throughput scenarios where multiple
 	// transactions may be in-flight but not yet mined.
-	result, err = c.Call(ctx, "eth_getTransactionCount", []interface{}{address, "pending"})
+	result, err := c.Call(ctx, "eth_getTransactionCount", []interface{}{address, "pending"})
 	if err != nil {
 		return 0, err
 	}
@@ -448,8 +476,11 @@ func (c *HTTPClient) GetNonce(ctx context.Context, address string) (uint64, erro
 	if err := json.Unmarshal(result, &nonceHex); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal nonce: %w", err)
 	}
-
-	return hexutil.MustDecodeUint64(nonceHex), nil
+	nonce, err := hexutil.DecodeUint64(nonceHex)
+	if err != nil {
+		return 0, fmt.Errorf("failed to decode nonce: %w", err)
+	}
+	return nonce, nil
 }
 
 // GetConfirmedNonce fetches the confirmed nonce for an address directly from the chain.
@@ -546,9 +577,9 @@ func (c *HTTPClient) GetBlockByNumberFull(ctx context.Context, blockNum uint64) 
 
 	// Parse the response with full transaction data
 	var rawBlock struct {
-		Number        string `json:"number"`
-		Hash          string `json:"hash"`
-		Transactions  []struct {
+		Number       string `json:"number"`
+		Hash         string `json:"hash"`
+		Transactions []struct {
 			Hash                 string `json:"hash"`
 			From                 string `json:"from"`
 			To                   string `json:"to"`

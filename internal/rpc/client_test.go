@@ -20,6 +20,43 @@ func TestRPCError(t *testing.T) {
 	}
 }
 
+func TestIsMethodNotFoundRPCError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "explicit method not found code",
+			err:  &RPCError{Code: -32601, Message: "Method not found"},
+			want: true,
+		},
+		{
+			name: "message contains does not exist",
+			err:  &RPCError{Code: -32000, Message: "the method eth_getPendingNonce does not exist/is not available"},
+			want: true,
+		},
+		{
+			name: "other rpc error",
+			err:  &RPCError{Code: -32000, Message: "nonce too low"},
+			want: false,
+		},
+		{
+			name: "non-rpc error",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMethodNotFoundRPCError(tt.err); got != tt.want {
+				t.Errorf("isMethodNotFoundRPCError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHTTPStatusError(t *testing.T) {
 	tests := []struct {
 		name       string
