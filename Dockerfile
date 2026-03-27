@@ -28,9 +28,15 @@ FROM alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f
 
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates curl
 
+RUN adduser -D -u 1000 appuser
+
 WORKDIR /app
 
 COPY --from=builder /app/load-generator .
+
+RUN chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 3001
 
