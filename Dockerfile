@@ -18,10 +18,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy source
 COPY . .
 
-# Build with cache mounts for Go modules and build cache
+# Build with cache mounts for Go modules (go-build cache cleared to ensure source changes are picked up)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
+    go clean -cache && go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
 
 # Runtime stage
 FROM alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659

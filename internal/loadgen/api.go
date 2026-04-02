@@ -114,6 +114,9 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		HSMProvider:             hsmProvider,
 		HSMKeyIDActive:          hsmKeyIDActive,
 		HSMFailoverEnabled:      hsmFailoverEnabled,
+		// Privacy proxy
+		PrivacyAvailable: lg.cfg.PrivacyRPCURL != "",
+		PrivacyMode:      lg.testConfig.PrivacyMode,
 	}
 
 	// Include TX flow stats if available

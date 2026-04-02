@@ -212,6 +212,8 @@ func (s *SQLiteStorage) migrate() error {
 		// Deployed contracts and test accounts (JSON)
 		{"test_runs", "deployed_contracts", "ALTER TABLE test_runs ADD COLUMN deployed_contracts TEXT"},
 		{"test_runs", "test_accounts", "ALTER TABLE test_runs ADD COLUMN test_accounts TEXT"},
+		// Privacy proxy mode
+		{"test_runs", "privacy_mode", "ALTER TABLE test_runs ADD COLUMN privacy_mode INTEGER DEFAULT 0"},
 	}
 
 	for _, m := range migrations {
@@ -275,9 +277,9 @@ func (s *SQLiteStorage) CreateTestRun(ctx context.Context, run *TestRun) error {
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO test_runs (id, started_at, pattern, transaction_type, duration_ms, config, status, tx_logging_enabled, execution_layer)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.StartedAt, run.Pattern, run.TransactionType, run.DurationMs, string(configJSON), run.Status, run.TxLoggingEnabled, executionLayer)
+		INSERT INTO test_runs (id, started_at, pattern, transaction_type, duration_ms, config, status, tx_logging_enabled, execution_layer, privacy_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.StartedAt, run.Pattern, run.TransactionType, run.DurationMs, string(configJSON), run.Status, run.TxLoggingEnabled, executionLayer, run.PrivacyMode)
 
 	return err
 }
@@ -380,7 +382,8 @@ func (s *SQLiteStorage) GetTestRun(ctx context.Context, id string) (*TestRun, er
 			COALESCE(on_chain_tx_count, 0), COALESCE(on_chain_gas_used, 0),
 			COALESCE(on_chain_mgas_per_sec, 0), COALESCE(on_chain_tps, 0), COALESCE(on_chain_duration_secs, 0),
 			environment, verification,
-			deployed_contracts, test_accounts
+			deployed_contracts, test_accounts,
+			COALESCE(privacy_mode, 0)
 		FROM test_runs WHERE id = ?
 	`, id)
 
@@ -410,7 +413,8 @@ func (s *SQLiteStorage) ListTestRuns(ctx context.Context, limit, offset int) (*P
 			COALESCE(on_chain_tx_count, 0), COALESCE(on_chain_gas_used, 0),
 			COALESCE(on_chain_mgas_per_sec, 0), COALESCE(on_chain_tps, 0), COALESCE(on_chain_duration_secs, 0),
 			environment, verification,
-			deployed_contracts, test_accounts
+			deployed_contracts, test_accounts,
+			COALESCE(privacy_mode, 0)
 		FROM test_runs
 		ORDER BY is_favorite DESC, started_at DESC
 		LIMIT ? OFFSET ?
@@ -721,6 +725,7 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 	var environmentJSON, verificationJSON sql.NullString
 	var deployedContractsJSON, testAccountsJSON sql.NullString
 
+	var privacyMode int
 	err := row.Scan(&run.ID, &run.StartedAt, &completedAt, &run.Pattern, &run.TransactionType, &run.DurationMs,
 		&run.TxSent, &run.TxConfirmed, &run.TxFailed, &run.TxDiscarded, &run.AverageTPS, &run.PeakTPS,
 		&latencyJSON, &preconfJSON, &pendingLatencyJSON, &configJSON, &run.Status, &errorMsg, &run.TxLoggingEnabled,
@@ -731,7 +736,8 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 		&run.OnChainFirstBlock, &run.OnChainLastBlock, &run.OnChainTxCount, &run.OnChainGasUsed,
 		&run.OnChainMgasPerSec, &run.OnChainTps, &run.OnChainDurationSecs,
 		&environmentJSON, &verificationJSON,
-		&deployedContractsJSON, &testAccountsJSON)
+		&deployedContractsJSON, &testAccountsJSON,
+		&privacyMode)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -750,6 +756,7 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 		run.CustomName = &customName.String
 	}
 	run.IsFavorite = isFavorite == 1
+	run.PrivacyMode = privacyMode == 1
 
 	if latencyJSON.Valid && latencyJSON.String != "" {
 		run.LatencyStats = &types.LatencyStats{}
@@ -802,6 +809,7 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 	var tipHistogramJSON, txTypeMetricsJSON sql.NullString
 	var environmentJSON, verificationJSON sql.NullString
 	var deployedContractsJSON, testAccountsJSON sql.NullString
+	var privacyMode int
 
 	err := rows.Scan(&run.ID, &run.StartedAt, &completedAt, &run.Pattern, &run.TransactionType, &run.DurationMs,
 		&run.TxSent, &run.TxConfirmed, &run.TxFailed, &run.TxDiscarded, &run.AverageTPS, &run.PeakTPS,
@@ -813,7 +821,8 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 		&run.OnChainFirstBlock, &run.OnChainLastBlock, &run.OnChainTxCount, &run.OnChainGasUsed,
 		&run.OnChainMgasPerSec, &run.OnChainTps, &run.OnChainDurationSecs,
 		&environmentJSON, &verificationJSON,
-		&deployedContractsJSON, &testAccountsJSON)
+		&deployedContractsJSON, &testAccountsJSON,
+		&privacyMode)
 
 	if err != nil {
 		return nil, err
@@ -829,6 +838,7 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 		run.CustomName = &customName.String
 	}
 	run.IsFavorite = isFavorite == 1
+	run.PrivacyMode = privacyMode == 1
 
 	if latencyJSON.Valid && latencyJSON.String != "" {
 		run.LatencyStats = &types.LatencyStats{}

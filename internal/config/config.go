@@ -30,6 +30,9 @@ type Config struct {
 	BlockTimeMS        int    // Block time in milliseconds (for account scaling)
 	CORSAllowedOrigins string // Comma-separated list of allowed origins, or "*" for all (default: "*")
 
+	PrivacyRPCURL        string // Privacy proxy RPC URL (optional)
+	PrivacyAuthTokenFile string // Path to file containing JWT Bearer token
+
 	// Capabilities holds the resolved execution layer capabilities.
 	// This is populated automatically based on ExecutionLayer.
 	Capabilities *execnode.ExecutionLayerCapabilities
@@ -183,6 +186,12 @@ func Load() (*Config, *CLIConfig, error) {
 		if fee, err := parseInt64Env(v); err == nil && fee >= 0 {
 			cfg.GasFeeCap = fee
 		}
+	}
+	if v := os.Getenv("PRIVACY_RPC_URL"); v != "" {
+		cfg.PrivacyRPCURL = v
+	}
+	if v := os.Getenv("PRIVACY_AUTH_TOKEN_FILE"); v != "" {
+		cfg.PrivacyAuthTokenFile = v
 	}
 
 	// Define command-line flags
