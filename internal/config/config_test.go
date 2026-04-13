@@ -39,8 +39,8 @@ func TestCalculateRequiredAccounts(t *testing.T) {
 			name:        "10000 TPS with 1s blocks",
 			targetTPS:   10000,
 			blockTimeMS: 1000,
-			wantMin:     490, // ceil(10000/30*1.5)=500
-			wantMax:     510,
+			wantMin:     990, // ceil(10000/15*1.5)=1000
+			wantMax:     1010,
 		},
 		{
 			name:        "very high TPS capped at max",
@@ -88,29 +88,29 @@ func TestEstimateMaxTPS(t *testing.T) {
 			name:        "10 accounts with 250ms blocks",
 			numAccounts: 10,
 			blockTimeMS: 250,
-			wantMin:     1100, // 10 * 30 / 0.25 = 1200
-			wantMax:     1300,
+			wantMin:     550, // 10 * 15 / 0.25 = 600
+			wantMax:     650,
 		},
 		{
 			name:        "100 accounts with 1s blocks",
 			numAccounts: 100,
 			blockTimeMS: 1000,
-			wantMin:     2900, // 100 * 30 / 1.0 = 3000
-			wantMax:     3100,
+			wantMin:     1400, // 100 * 15 / 1.0 = 1500
+			wantMax:     1600,
 		},
 		{
 			name:        "1 account with 1s blocks",
 			numAccounts: 1,
 			blockTimeMS: 1000,
-			wantMin:     25, // 1 * 30 / 1.0 = 30
-			wantMax:     35,
+			wantMin:     12, // 1 * 15 / 1.0 = 15
+			wantMax:     18,
 		},
 		{
 			name:        "zero block time uses default",
 			numAccounts: 100,
 			blockTimeMS: 0,
-			wantMin:     11000, // 100 * 30 / 0.25 = 12000
-			wantMax:     13000,
+			wantMin:     5500, // 100 * 15 / 0.25 = 6000
+			wantMax:     6500,
 		},
 	}
 

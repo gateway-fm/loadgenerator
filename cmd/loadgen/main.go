@@ -913,6 +913,18 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
 	allAccounts = append(allAccounts, dynamicAccounts...)
 
+	// Final builder reset right before sending — clears any state from funding phase
+	// AND any leftover TXs from previous tests. This is critical for test isolation.
+	if err := lg.resetBuilderNonces(); err != nil {
+		lg.logger.Warn("failed pre-send builder nonce reset", "error", err)
+	}
+
+	// Re-initialize nonces from chain (L2 RPC) AFTER the reset — ensures loadgen
+	// starts from confirmed nonces, not the builder's (now-empty) cache.
+	if err := lg.accountMgr.InitializeNoncesFromChain(lg.ctx, lg.l2Client, len(allAccounts)); err != nil {
+		lg.logger.Warn("failed post-reset nonce init from chain", "error", err)
+	}
+
 	// Start sender workers
 	// More workers = better parallelism, but must not exceed semaphore capacity
 	numWorkers := len(allAccounts)
