@@ -28,6 +28,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/contract"
 	"github.com/gateway-fm/loadgenerator/internal/execnode"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
+	"github.com/gateway-fm/loadgenerator/internal/noncehealer"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/ratelimit"
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
@@ -953,6 +954,26 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Start backpressure monitor to check block builder status
 	lg.wg.Add(1)
 	go lg.backpressureMonitor()
+
+	// Start nonce gap healer if enabled
+	if req.FixNonceGaps {
+		lg.wg.Add(1)
+		go func() {
+			defer lg.wg.Done()
+			healer := noncehealer.New(noncehealer.Config{
+				BuilderClient: lg.builderClient,
+				L2Client:      lg.l2Client,
+				Accounts:      allAccounts,
+				ChainID:       big.NewInt(lg.cfg.ChainID),
+				GasTipCap:     lg.gasTipCap,
+				GasFeeCap:     lg.gasFeeCap,
+				Logger:        lg.logger,
+				PollInterval:  2 * time.Second,
+			})
+			healer.Run(lg.ctx)
+		}()
+		lg.logger.Info("nonce gap healer enabled")
+	}
 
 	// Start completion watcher (NOT in WaitGroup because it calls StopTest which waits on wg)
 	go lg.completionWatcher()
