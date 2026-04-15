@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gateway-fm/loadgenerator/internal/config"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/ratelimit"
+	"github.com/gateway-fm/loadgenerator/internal/rpc"
+	"github.com/gateway-fm/loadgenerator/internal/sender"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
@@ -356,6 +360,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			Status:           "running",
 			TxLoggingEnabled: lg.txLoggingEnabled,
 			ExecutionLayer:   lg.cfg.ExecutionLayer, // Track which execution layer was used
+			PrivacyMode:      req.PrivacyMode,
 			CustomName:       &defaultName,
 		}
 		if err := lg.storage.CreateTestRun(context.Background(), testRun); err != nil {
@@ -425,6 +430,35 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			lg.logger.Warn("failed to get start block number", "error", err)
 		}
 		cancel()
+	}
+
+	// Swap sender to privacy-routed client if privacy mode requested
+	if req.PrivacyMode && lg.cfg.PrivacyRPCURL != "" {
+		// Always re-read token file (token may have been refreshed between tests)
+		{
+			privacyCfg := rpc.DefaultClientConfig(lg.cfg.PrivacyRPCURL)
+			privacyCfg.Logger = lg.logger
+			if lg.cfg.PrivacyAuthTokenFile != "" {
+				tokenBytes, err := os.ReadFile(lg.cfg.PrivacyAuthTokenFile)
+				if err != nil {
+					lg.logger.Error("failed to read privacy auth token file", "path", lg.cfg.PrivacyAuthTokenFile, "error", err)
+					lg.setError(fmt.Sprintf("privacy mode requires auth token: %v", err))
+					return
+				}
+				privacyCfg.AuthToken = strings.TrimSpace(string(tokenBytes))
+			}
+			// Wrap in NoBatchClient — privacy proxy rejects JSON-RPC batch requests
+			lg.privacyBuilderClient = rpc.NewNoBatchClient(rpc.NewHTTPClient(privacyCfg))
+		}
+		lg.sender = sender.New(sender.Config{
+			Client:      lg.privacyBuilderClient,
+			Concurrency: 2000,
+			Logger:      lg.logger,
+		})
+		lg.logger.Info("using privacy proxy for this test", "url", lg.cfg.PrivacyRPCURL)
+	} else {
+		// Ensure we use the default sender (restore after a previous privacy test)
+		lg.sender = lg.defaultSender
 	}
 
 	// Phase: Starting workers

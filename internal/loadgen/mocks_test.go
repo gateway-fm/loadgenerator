@@ -140,6 +140,9 @@ func (m *mockRPCClient) GetTransactionReceiptsBatch(ctx context.Context, txHashe
 	}
 	return nil, nil
 }
+func (m *mockRPCClient) GetTransactionByHash(ctx context.Context, txHash string) (*rpc.TransactionInfo, error) {
+	return nil, nil
+}
 
 // mockStorage implements storage.Storage with sensible defaults.
 type mockStorage struct {
