@@ -1233,6 +1233,11 @@ func (lg *LoadGenerator) Reset() {
 		return true
 	})
 
+	// Flush the builder's mempool to clear any leftover transactions from the previous test
+	if err := lg.flushBuilderMempool(); err != nil {
+		lg.logger.Warn("failed to flush builder mempool on reset", "error", err)
+	}
+
 	lg.logger.Info("test reset")
 }
 
@@ -2230,6 +2235,39 @@ func (lg *LoadGenerator) resetBuilderNonces() error {
 	}
 
 	lg.logger.Info("block builder nonce cache reset successfully")
+	return nil
+}
+
+// flushBuilderMempool calls the block builder's /flush-mempool endpoint to clear
+// all pending transactions. Called on test reset to ensure a clean slate.
+func (lg *LoadGenerator) flushBuilderMempool() error {
+	if !lg.cfg.Capabilities.HasExternalBlockBuilder {
+		return nil
+	}
+
+	baseURL := lg.cfg.BuilderRPCURL
+	flushURL := baseURL + "/flush-mempool"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", flushURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to POST /flush-mempool: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("flush-mempool returned status %d", resp.StatusCode)
+	}
+
+	lg.logger.Info("block builder mempool flushed successfully")
 	return nil
 }
 
