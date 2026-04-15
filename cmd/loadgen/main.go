@@ -83,18 +83,20 @@ func main() {
 		}
 	}
 	cfg := &config.Config{
-		BuilderRPCURL:  *builderURL,
-		L2RPCURL:       *l2URL,
-		PreconfWSURL:   *preconfWS,
-		ChainID:        *chainID,
-		GasPrice:       *gasPrice,
-		GasTipCap:      gasTipCap,
-		GasFeeCap:      gasFeeCap,
-		GasLimit:       *gasLimit,
-		ListenAddr:     *listenAddr,
-		DatabasePath:   *databasePath,
-		BlockTimeMS:    *blockTimeMS,
-		ExecutionLayer: *executionLayer,
+		BuilderRPCURL:        *builderURL,
+		L2RPCURL:             *l2URL,
+		PreconfWSURL:         *preconfWS,
+		ChainID:              *chainID,
+		GasPrice:             *gasPrice,
+		GasTipCap:            gasTipCap,
+		GasFeeCap:            gasFeeCap,
+		GasLimit:             *gasLimit,
+		ListenAddr:           *listenAddr,
+		DatabasePath:         *databasePath,
+		BlockTimeMS:          *blockTimeMS,
+		ExecutionLayer:       *executionLayer,
+		PrivacyRPCURL:        os.Getenv("PRIVACY_RPC_URL"),
+		PrivacyAuthTokenFile: os.Getenv("PRIVACY_AUTH_TOKEN_FILE"),
 	}
 
 	cfg.Capabilities = execnode.DefaultRegistry().Get(cfg.ExecutionLayer)

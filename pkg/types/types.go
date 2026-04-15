@@ -225,6 +225,10 @@ type TestMetrics struct {
 	HSMProvider             string `json:"hsmProvider,omitempty"`
 	HSMKeyIDActive          string `json:"hsmKeyIdActive,omitempty"`
 	HSMFailoverEnabled      bool   `json:"hsmFailoverEnabled"`
+
+	// Privacy proxy
+	PrivacyAvailable bool `json:"privacyAvailable"`
+	PrivacyMode      bool `json:"privacyMode"`
 }
 
 // TestResult stores the final results of a completed test.
@@ -244,6 +248,7 @@ type TestResult struct {
 	Latency         *LatencyStats    `json:"latency,omitempty"`
 	PreconfLatency  *LatencyStats    `json:"preconfLatency,omitempty"`
 	FlowStats       *TxFlowStats     `json:"flowStats,omitempty"` // TX flow tracking stats
+	PrivacyMode     bool             `json:"privacyMode"`
 	Config          StartTestRequest `json:"config"`
 }
 
@@ -276,6 +281,9 @@ type StartTestRequest struct {
 
 	// Realistic pattern
 	RealisticConfig *RealisticTestConfig `json:"realisticConfig,omitempty"`
+
+	// Privacy proxy mode
+	PrivacyMode bool `json:"privacyMode,omitempty"`
 
 	// Nonce gap healing — send no-op self-transfers to fill gaps during test
 	FixNonceGaps bool `json:"fixNonceGaps,omitempty"`

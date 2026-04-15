@@ -36,9 +36,10 @@ const (
 // LoadGenerator orchestrates high-throughput transaction generation.
 // It implements transport.LoadGeneratorAPI.
 type LoadGenerator struct {
-	cfg           *config.Config
-	builderClient rpc.Client
-	l2Client      rpc.Client
+	cfg                  *config.Config
+	builderClient        rpc.Client
+	privacyBuilderClient rpc.Client // Privacy-routed builder client (optional)
+	l2Client             rpc.Client
 	accountMgr    AccountManager
 	patternReg    *pattern.Registry
 	txBuilderReg  *txbuilder.Registry
@@ -155,7 +156,8 @@ type LoadGenerator struct {
 	stopping int32 // atomic
 
 	// Async transaction sender with backpressure
-	sender TxSender
+	sender        TxSender
+	defaultSender TxSender // Original sender (restored after privacy-mode tests)
 
 	// Test history (in-memory cache for backwards compatibility)
 	testHistory   []types.TestResult
@@ -286,6 +288,12 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		lg.l2Client = rpc.NewHTTPClient(l2Cfg)
 	}
 
+	// Log privacy proxy availability (client created lazily when a privacy-mode test starts,
+	// so the auth token file has time to be written by the setup container).
+	if cfg.PrivacyRPCURL != "" {
+		logger.Info("privacy proxy available (client created on first privacy-mode test)", "url", cfg.PrivacyRPCURL)
+	}
+
 	// Create default metrics collector if not injected
 	if lg.metricsCol == nil {
 		lg.metricsCol = metrics.NewInMemoryCollector(true)
@@ -308,6 +316,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			Logger:      logger,
 		})
 	}
+	lg.defaultSender = lg.sender
 
 	// Wire cache storage if the store supports it
 	if cs, ok := store.(storage.CacheStorage); ok {

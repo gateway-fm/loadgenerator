@@ -164,6 +164,7 @@ type ClientConfig struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	Logger         *slog.Logger
+	AuthToken      string // Optional Bearer token for Authorization header
 }
 
 // DefaultClientConfig returns default configuration.
@@ -187,6 +188,7 @@ type HTTPClient struct {
 	backoff    time.Duration
 	maxBackoff time.Duration
 	logger     *slog.Logger
+	authToken  string
 }
 
 // NewHTTPClient creates a new HTTP-based RPC client.
@@ -215,6 +217,7 @@ func NewHTTPClient(cfg ClientConfig) *HTTPClient {
 		backoff:    cfg.InitialBackoff,
 		maxBackoff: cfg.MaxBackoff,
 		logger:     logger,
+		authToken:  cfg.AuthToken,
 	}
 }
 
@@ -292,6 +295,9 @@ func (c *HTTPClient) doRequest(ctx context.Context, body []byte) (json.RawMessag
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -838,6 +844,9 @@ func (c *HTTPClient) doBatchRequest(ctx context.Context, body []byte, expectedCo
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
