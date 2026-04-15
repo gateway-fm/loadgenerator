@@ -66,6 +66,9 @@ type Client interface {
 
 	// GetTransactionReceiptsBatch fetches multiple receipts in a single request.
 	GetTransactionReceiptsBatch(ctx context.Context, txHashes []string) ([]*TransactionReceipt, error)
+
+	// GetTransactionByHash returns basic transaction info, or nil if not found.
+	GetTransactionByHash(ctx context.Context, txHash string) (*TransactionInfo, error)
 }
 
 // TransactionReceipt represents an Ethereum transaction receipt.
@@ -161,6 +164,7 @@ type ClientConfig struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	Logger         *slog.Logger
+	AuthToken      string // Optional Bearer token for Authorization header
 }
 
 // DefaultClientConfig returns default configuration.
@@ -184,6 +188,7 @@ type HTTPClient struct {
 	backoff    time.Duration
 	maxBackoff time.Duration
 	logger     *slog.Logger
+	authToken  string
 }
 
 // NewHTTPClient creates a new HTTP-based RPC client.
@@ -212,6 +217,7 @@ func NewHTTPClient(cfg ClientConfig) *HTTPClient {
 		backoff:    cfg.InitialBackoff,
 		maxBackoff: cfg.MaxBackoff,
 		logger:     logger,
+		authToken:  cfg.AuthToken,
 	}
 }
 
@@ -289,6 +295,9 @@ func (c *HTTPClient) doRequest(ctx context.Context, body []byte) (json.RawMessag
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -730,6 +739,38 @@ func (c *HTTPClient) GetTransactionReceipt(ctx context.Context, txHash string) (
 	}, nil
 }
 
+// TransactionInfo contains basic transaction information.
+type TransactionInfo struct {
+	Hash        string
+	BlockNumber uint64
+}
+
+// GetTransactionByHash returns basic transaction info, or nil if not found.
+func (c *HTTPClient) GetTransactionByHash(ctx context.Context, txHash string) (*TransactionInfo, error) {
+	result, err := c.Call(ctx, "eth_getTransactionByHash", []any{txHash})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var raw struct {
+		Hash        string `json:"hash"`
+		BlockNumber string `json:"blockNumber"`
+	}
+	if err := json.Unmarshal(result, &raw); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal transaction: %w", err)
+	}
+
+	blockNumber, _ := hexutil.DecodeUint64(raw.BlockNumber)
+	return &TransactionInfo{
+		Hash:        raw.Hash,
+		BlockNumber: blockNumber,
+	}, nil
+}
+
 // BatchCall makes multiple JSON-RPC calls in a single HTTP request.
 // Results are returned in the same order as the input calls.
 // Individual call errors are returned in BatchResponse.Error.
@@ -803,6 +844,9 @@ func (c *HTTPClient) doBatchRequest(ctx context.Context, body []byte, expectedCo
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

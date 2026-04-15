@@ -29,6 +29,7 @@ type TestRun struct {
 	ErrorMessage     string                  `json:"errorMessage,omitempty"`
 	TxLoggingEnabled bool                    `json:"txLoggingEnabled"`
 	ExecutionLayer   string                  `json:"executionLayer"` // "reth" or "cdk-erigon"
+	PrivacyMode      bool                    `json:"privacyMode"`   // Whether test used privacy proxy
 	// Block metrics (aggregated from time series)
 	BlockCount     int     `json:"blockCount,omitempty"`     // Total blocks produced during test
 	TotalGasUsed   uint64  `json:"totalGasUsed,omitempty"`   // Total gas used across all blocks
