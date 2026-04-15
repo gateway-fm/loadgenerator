@@ -346,6 +346,11 @@ func (lg *LoadGenerator) Reset() {
 		return true
 	})
 
+	// Flush the builder's mempool to clear any leftover transactions from the previous test
+	if err := lg.flushBuilderMempool(); err != nil {
+		lg.logger.Warn("failed to flush builder mempool on reset", "error", err)
+	}
+
 	lg.logger.Info("test reset")
 }
 
