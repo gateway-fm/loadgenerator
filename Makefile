@@ -1,8 +1,9 @@
-.PHONY: build test bench test-contract test-e2e docker docker-push run run-local setup-hooks clean mcp-build mcp-run help
+.PHONY: build test bench test-contract test-e2e docker docker-buildx docker-push docker-release run run-local setup-hooks clean mcp-build mcp-run help
 
 # Docker image
 DOCKER_IMAGE ?= gatewayfm/loadgenerator
 DOCKER_TAG ?= latest
+DOCKER_PLATFORMS ?= linux/amd64,linux/arm64
 
 # Build the load-generator binary
 build:
@@ -28,13 +29,21 @@ test-e2e:
 	PRECONF_WS_URL=ws://localhost:13002/ws/preconfirmations \
 	go test -v -race -timeout 120s ./internal/integration/... -run "TestE2E"
 
-# Build Docker image
+# Build Docker image (single-arch, for local use)
 docker:
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
-# Push Docker image to DockerHub
+# Build multi-arch Docker image (no push) — mirrors release workflow
+docker-buildx:
+	docker buildx build --platform $(DOCKER_PLATFORMS) -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+
+# Push Docker image to DockerHub (single-arch)
 docker-push: docker
 	docker push $(DOCKER_IMAGE):$(DOCKER_TAG)
+
+# Build and push multi-arch Docker image — mirrors release workflow
+docker-release:
+	docker buildx build --platform $(DOCKER_PLATFORMS) --push -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
 # Run in Docker (builds image and starts via docker-compose)
 run:
@@ -88,12 +97,15 @@ help:
 	@echo "    make test-e2e      - E2E tests (requires running stack)"
 	@echo ""
 	@echo "  Docker:"
-	@echo "    make docker        - Build Docker image"
-	@echo "    make docker-push   - Push to DockerHub"
+	@echo "    make docker          - Build Docker image (single-arch)"
+	@echo "    make docker-buildx   - Build multi-arch image (no push)"
+	@echo "    make docker-push     - Push single-arch image to DockerHub"
+	@echo "    make docker-release  - Build and push multi-arch image"
 	@echo ""
 	@echo "  Configuration:"
-	@echo "    DOCKER_IMAGE       - Docker image name (default: gatewayfm/loadgenerator)"
-	@echo "    DOCKER_TAG         - Docker image tag (default: latest)"
+	@echo "    DOCKER_IMAGE         - Docker image name (default: gatewayfm/loadgenerator)"
+	@echo "    DOCKER_TAG           - Docker image tag (default: latest)"
+	@echo "    DOCKER_PLATFORMS     - Target platforms (default: linux/amd64,linux/arm64)"
 	@echo ""
 	@echo "  MCP:"
 	@echo "    make mcp-build     - Build MCP server binary"
