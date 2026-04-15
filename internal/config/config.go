@@ -175,7 +175,7 @@ func Load() (*Config, *CLIConfig, error) {
 		cfg.CORSAllowedOrigins = v
 	}
 	if v := os.Getenv("GAS_TIP_CAP"); v != "" {
-		if tip, err := parseInt64Env(v); err == nil && tip > 0 {
+		if tip, err := parseInt64Env(v); err == nil && tip >= 0 {
 			cfg.GasTipCap = tip
 		}
 	}
@@ -267,8 +267,8 @@ func (c *Config) Validate() error {
 	if c.ChainID <= 0 {
 		return fmt.Errorf("chain ID must be positive")
 	}
-	if c.GasTipCap <= 0 {
-		return fmt.Errorf("gas tip cap must be positive")
+	if c.GasTipCap < 0 {
+		return fmt.Errorf("gas tip cap cannot be negative")
 	}
 	// GasFeeCap can be 0 (auto-calculate from chain) or positive
 	if c.GasFeeCap < 0 {
