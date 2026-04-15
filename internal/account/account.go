@@ -4,6 +4,7 @@ package account
 import (
 	"context"
 	"crypto/ecdsa"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -18,6 +19,7 @@ type Account struct {
 	PrivateKey *ecdsa.PrivateKey
 	Address    common.Address
 	nonce      uint64
+	freeNonces []uint64 // rolled-back nonces available for reuse (sorted ascending)
 	mu         sync.Mutex
 }
 
@@ -81,8 +83,15 @@ func (n *Nonce) Rollback() {
 //	n.Commit() // Success - prevent rollback
 func (a *Account) ReserveNonce() *Nonce {
 	a.mu.Lock()
-	nonce := a.nonce
-	a.nonce++
+	var nonce uint64
+	if len(a.freeNonces) > 0 {
+		// Reuse the lowest rolled-back nonce to fill gaps
+		nonce = a.freeNonces[0]
+		a.freeNonces = a.freeNonces[1:]
+	} else {
+		nonce = a.nonce
+		a.nonce++
+	}
 	a.mu.Unlock()
 
 	return &Nonce{
@@ -91,15 +100,32 @@ func (a *Account) ReserveNonce() *Nonce {
 	}
 }
 
-// rollback decrements nonce if it was the last one issued.
+// rollback returns a nonce to the free pool for reuse.
+// If it's the most recent nonce, simply decrements the counter.
+// Otherwise, inserts into the sorted free list so it gets reused
+// by the next ReserveNonce call, filling the gap.
 func (a *Account) rollback(nonce uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	// Only rollback if this was the most recent nonce
-	// (prevents issues with out-of-order rollbacks)
+
+	// Fast path: if this was the most recent nonce, just decrement
 	if a.nonce == nonce+1 {
 		a.nonce = nonce
+		return
 	}
+
+	// Out-of-order rollback: insert into free list (sorted ascending)
+	// so the lowest nonce gets reused first, filling gaps immediately.
+	pos := sort.Search(len(a.freeNonces), func(i int) bool {
+		return a.freeNonces[i] >= nonce
+	})
+	// Avoid duplicates
+	if pos < len(a.freeNonces) && a.freeNonces[pos] == nonce {
+		return
+	}
+	a.freeNonces = append(a.freeNonces, 0)
+	copy(a.freeNonces[pos+1:], a.freeNonces[pos:])
+	a.freeNonces[pos] = nonce
 }
 
 // Resync fetches the current nonce from the chain and updates local state.
@@ -117,6 +143,8 @@ func (a *Account) Resync(ctx context.Context, client rpc.Client) error {
 	if nonce > a.nonce {
 		a.nonce = nonce
 	}
+	// Clear free list — chain state is authoritative after resync
+	a.freeNonces = a.freeNonces[:0]
 	a.mu.Unlock()
 	return nil
 }
@@ -136,15 +164,18 @@ func (a *Account) ResyncFromChain(ctx context.Context, client rpc.Client) error 
 	if nonce > a.nonce {
 		a.nonce = nonce
 	}
+	// Clear free list — chain state is authoritative after resync
+	a.freeNonces = a.freeNonces[:0]
 	a.mu.Unlock()
 	return nil
 }
 
-// SetNonce sets the nonce value directly.
+// SetNonce sets the nonce value directly and clears the free list.
 // Prefer Resync for fetching from chain, or ReserveNonce for normal use.
 func (a *Account) SetNonce(nonce uint64) {
 	a.mu.Lock()
 	a.nonce = nonce
+	a.freeNonces = a.freeNonces[:0]
 	a.mu.Unlock()
 }
 

@@ -290,13 +290,20 @@ func TestReserveNonceOutOfOrderRollback(t *testing.T) {
 		t.Errorf("after two reserves, PeekNonce() = %d, want 102", got)
 	}
 
-	// Rollback n1 first (out of order) - should NOT rollback because n2 is still out
+	// Rollback n1 first (out of order) - goes into free list for reuse
 	n1.Rollback()
 	if got := acc.PeekNonce(); got != 102 {
-		t.Errorf("after out-of-order n1 rollback, PeekNonce() = %d, want 102 (unchanged)", got)
+		t.Errorf("after out-of-order n1 rollback, PeekNonce() = %d, want 102 (counter unchanged)", got)
 	}
 
-	// Rollback n2 - this one is the most recent, should rollback
+	// Next reserve should reuse nonce 100 from the free list
+	n3 := acc.ReserveNonce()
+	if n3.Value() != 100 {
+		t.Errorf("n3 (reused) = %d, want 100", n3.Value())
+	}
+	n3.Commit()
+
+	// Rollback n2 - this one is the most recent, should decrement counter
 	n2.Rollback()
 	if got := acc.PeekNonce(); got != 101 {
 		t.Errorf("after n2 rollback, PeekNonce() = %d, want 101", got)
@@ -432,10 +439,9 @@ func TestAsyncCallbackPattern(t *testing.T) {
 
 	// Simulate: n0 fails!
 	n0.Rollback()
-	// n0 can't rollback because n2 still has nonce 102 reserved (n0=100, current=103)
-	// This is expected - out of order rollback doesn't decrement
+	// n0 goes into free list (out-of-order rollback)
 	if got := acc.PeekNonce(); got != 103 {
-		t.Errorf("after n0 out-of-order rollback, PeekNonce() = %d, want 103 (unchanged)", got)
+		t.Errorf("after n0 out-of-order rollback, PeekNonce() = %d, want 103 (counter unchanged)", got)
 	}
 
 	// Simulate: n2 succeeds
@@ -444,10 +450,13 @@ func TestAsyncCallbackPattern(t *testing.T) {
 		t.Errorf("after n2 commit, PeekNonce() = %d, want 103 (unchanged)", got)
 	}
 
-	// Key assertion: Even with n0 failed, we don't have a nonce gap from
-	// the load generator's perspective. The block builder may see a gap
-	// (nonce 100 missing) but that's because n0's TX genuinely failed to send.
-	// The important thing is n1 (101) and n2 (102) are correctly committed.
+	// Key assertion: n0 (100) is now in the free list.
+	// The next ReserveNonce will reuse it, filling the gap.
+	n3 := acc.ReserveNonce()
+	if n3.Value() != 100 {
+		t.Errorf("next reserve should reuse rolled-back nonce 100, got %d", n3.Value())
+	}
+	n3.Commit()
 }
 
 // TestAsyncCallbackPatternSequentialFailure tests the scenario where
