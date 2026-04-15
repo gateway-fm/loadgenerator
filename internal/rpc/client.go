@@ -66,6 +66,9 @@ type Client interface {
 
 	// GetTransactionReceiptsBatch fetches multiple receipts in a single request.
 	GetTransactionReceiptsBatch(ctx context.Context, txHashes []string) ([]*TransactionReceipt, error)
+
+	// GetTransactionByHash returns basic transaction info, or nil if not found.
+	GetTransactionByHash(ctx context.Context, txHash string) (*TransactionInfo, error)
 }
 
 // TransactionReceipt represents an Ethereum transaction receipt.
@@ -733,6 +736,38 @@ func (c *HTTPClient) GetTransactionReceipt(ctx context.Context, txHash string) (
 		ContractAddress:   rawReceipt.ContractAddress,
 		BlockNumber:       blockNumber,
 		EffectiveGasPrice: effectiveGasPrice,
+	}, nil
+}
+
+// TransactionInfo contains basic transaction information.
+type TransactionInfo struct {
+	Hash        string
+	BlockNumber uint64
+}
+
+// GetTransactionByHash returns basic transaction info, or nil if not found.
+func (c *HTTPClient) GetTransactionByHash(ctx context.Context, txHash string) (*TransactionInfo, error) {
+	result, err := c.Call(ctx, "eth_getTransactionByHash", []any{txHash})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var raw struct {
+		Hash        string `json:"hash"`
+		BlockNumber string `json:"blockNumber"`
+	}
+	if err := json.Unmarshal(result, &raw); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal transaction: %w", err)
+	}
+
+	blockNumber, _ := hexutil.DecodeUint64(raw.BlockNumber)
+	return &TransactionInfo{
+		Hash:        raw.Hash,
+		BlockNumber: blockNumber,
 	}, nil
 }
 

@@ -63,7 +63,7 @@ const (
 	DefaultBlockTimeMS         = 250        // 250ms default block time
 	DefaultCORSAllowedOrigins  = "*"        // Allow all origins by default for dev
 	AccountSafetyMargin        = 1.5        // 50% extra accounts for safety
-	TxsPerAccountPerBlock      = 30         // TXs each account can sustain per block (50 tested sustainable, 30 with safety buffer)
+	TxsPerAccountPerBlock      = 15         // TXs each account can sustain per block (conservative: reduces nonce queue depth)
 	MinAccountsForAdaptive = 500        // Minimum accounts for "adaptive" pattern
 	MaxAccountsLimit       = 5000       // Maximum accounts to prevent resource exhaustion
 	MinAccounts            = 100        // Minimum accounts for any load test

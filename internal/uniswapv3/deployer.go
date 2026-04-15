@@ -729,8 +729,18 @@ func (d *Deployer) waitForTxReceipt(ctx context.Context, txHash string, timeout 
 		case <-timeoutCh:
 			return fmt.Errorf("timeout waiting for TX receipt: %s", txHash)
 		case <-ticker.C:
+			// Try receipt first, fall back to checking tx inclusion by hash
 			receipt, err := d.client.GetTransactionReceipt(ctx, txHash)
 			if err != nil {
+				// Receipt RPC may fail (e.g. op-reth L1 block info bug).
+				// Fall back to checking if tx is included via eth_getTransactionByHash.
+				tx, txErr := d.client.GetTransactionByHash(ctx, txHash)
+				if txErr != nil || tx == nil {
+					continue
+				}
+				if tx.BlockNumber > 0 {
+					return nil // tx is included in a block
+				}
 				continue
 			}
 			if receipt != nil {
@@ -926,7 +936,7 @@ func (d *Deployer) sendTxAndWaitForReceipt(ctx context.Context, sender *account.
 
 	txHash := signedTx.Hash().Hex()
 
-	// Wait for receipt
+	// Wait for receipt (falls back to tx-by-hash when receipt RPC fails)
 	timeout := time.After(30 * time.Second)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -940,6 +950,19 @@ func (d *Deployer) sendTxAndWaitForReceipt(ctx context.Context, sender *account.
 		case <-ticker.C:
 			receipt, err := d.client.GetTransactionReceipt(ctx, txHash)
 			if err != nil {
+				// Receipt RPC may fail (e.g. op-reth L1 block info bug).
+				// Fall back to checking tx inclusion via eth_getTransactionByHash.
+				tx, txErr := d.client.GetTransactionByHash(ctx, txHash)
+				if txErr != nil || tx == nil {
+					continue
+				}
+				if tx.BlockNumber > 0 {
+					d.logger.Debug("TX confirmed (via getTransactionByHash)",
+						slog.String("name", name),
+						slog.String("txHash", txHash),
+					)
+					return nil
+				}
 				continue
 			}
 			if receipt != nil {
@@ -957,7 +980,9 @@ func (d *Deployer) sendTxAndWaitForReceipt(ctx context.Context, sender *account.
 	}
 }
 
-// waitForDeploymentWithReceipt waits for deployment and checks receipt status.
+// waitForDeploymentWithReceipt waits for deployment by checking contract code exists.
+// Falls back from receipt polling to code-only checks when receipt RPC fails
+// (e.g. op-reth L1 block info bug returns errors for eth_getTransactionReceipt).
 func (d *Deployer) waitForDeploymentWithReceipt(ctx context.Context, name string, addr common.Address, txHash string) (common.Address, error) {
 	timeout := time.After(60 * time.Second)
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -970,31 +995,25 @@ func (d *Deployer) waitForDeploymentWithReceipt(ctx context.Context, name string
 		case <-timeout:
 			return common.Address{}, fmt.Errorf("timeout waiting for %s deployment at %s (txHash: %s)", name, addr.Hex(), txHash)
 		case <-ticker.C:
-			// First check the receipt for status
-			receipt, err := d.client.GetTransactionReceipt(ctx, txHash)
+			// Check if contract code exists at the expected address
+			code, err := d.client.GetCode(ctx, addr.Hex())
 			if err != nil {
-				d.logger.Debug("Error getting receipt", slog.String("error", err.Error()))
+				d.logger.Debug("Error getting code", slog.String("error", err.Error()))
 				continue
 			}
-			if receipt != nil {
-				if receipt.Status == 0 {
-					// Transaction failed
-					return common.Address{}, fmt.Errorf("%s deployment tx failed (status=0, gasUsed=%d, txHash=%s)", name, receipt.GasUsed, txHash)
+			if code != "0x" && len(code) > 2 {
+				// Contract is deployed. Try to get receipt for gas info (best effort).
+				var gasUsed uint64
+				receipt, err := d.client.GetTransactionReceipt(ctx, txHash)
+				if err == nil && receipt != nil {
+					gasUsed = receipt.GasUsed
 				}
-				// Status == 1 means success, check for code
-				code, err := d.client.GetCode(ctx, addr.Hex())
-				if err != nil {
-					d.logger.Debug("Error getting code", slog.String("error", err.Error()))
-					continue
-				}
-				if code != "0x" && len(code) > 2 {
-					d.logger.Info("Contract deployed",
-						slog.String("name", name),
-						slog.String("address", addr.Hex()),
-						slog.Uint64("gasUsed", receipt.GasUsed),
-					)
-					return addr, nil
-				}
+				d.logger.Info("Contract deployed",
+					slog.String("name", name),
+					slog.String("address", addr.Hex()),
+					slog.Uint64("gasUsed", gasUsed),
+				)
+				return addr, nil
 			}
 		}
 	}

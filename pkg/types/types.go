@@ -284,6 +284,9 @@ type StartTestRequest struct {
 
 	// Privacy proxy mode
 	PrivacyMode bool `json:"privacyMode,omitempty"`
+
+	// Nonce gap healing — send no-op self-transfers to fill gaps during test
+	FixNonceGaps bool `json:"fixNonceGaps,omitempty"`
 }
 
 // PreconfEvent is the event received from the preconfirmation WebSocket.
