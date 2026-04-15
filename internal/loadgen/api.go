@@ -114,6 +114,9 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		HSMProvider:             hsmProvider,
 		HSMKeyIDActive:          hsmKeyIDActive,
 		HSMFailoverEnabled:      hsmFailoverEnabled,
+		// Privacy proxy
+		PrivacyAvailable: lg.cfg.PrivacyRPCURL != "",
+		PrivacyMode:      lg.testConfig.PrivacyMode,
 	}
 
 	// Include TX flow stats if available
@@ -345,6 +348,11 @@ func (lg *LoadGenerator) Reset() {
 		lg.pendingTxs.Delete(key)
 		return true
 	})
+
+	// Flush the builder's mempool to clear any leftover transactions from the previous test
+	if err := lg.flushBuilderMempool(); err != nil {
+		lg.logger.Warn("failed to flush builder mempool on reset", "error", err)
+	}
 
 	lg.logger.Info("test reset")
 }

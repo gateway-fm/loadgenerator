@@ -120,6 +120,52 @@ func (m *Manager) InitializeNonces(ctx context.Context, client rpc.Client, numAc
 	return nil
 }
 
+// InitializeNoncesFromChain fetches confirmed nonces directly from the L2 chain,
+// bypassing the builder's cache. Used after builder reset to ensure clean state.
+func (m *Manager) InitializeNoncesFromChain(ctx context.Context, client rpc.Client, numAccounts int) error {
+	m.logger.Info("Initializing account nonces from chain (confirmed)...", slog.Int("count", numAccounts))
+
+	// Include both built-in and dynamic accounts
+	all := make([]*Account, 0, len(m.accounts)+len(m.dynamicAccounts))
+	all = append(all, m.accounts...)
+	all = append(all, m.dynamicAccounts...)
+	count := numAccounts
+	if count > len(all) {
+		count = len(all)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, count)
+	sem := make(chan struct{}, 16)
+
+	for i := range count {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			account := all[idx]
+			if err := account.ResyncFromChain(ctx, client); err != nil {
+				select {
+				case errChan <- fmt.Errorf("account %d: %w", idx, err):
+				default:
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	if err := <-errChan; err != nil {
+		return err
+	}
+
+	m.logger.Info("Account nonces initialized from chain", slog.Int("count", count))
+	return nil
+}
+
 // InitializeDynamicNonces fetches initial nonces for dynamic accounts in parallel.
 // CRITICAL: Uses Resync to sync through builder (eth_getPendingNonce), which also
 // populates the builder's nonce cache for these new accounts. This prevents cache
