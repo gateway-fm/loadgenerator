@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gateway-fm/loadgenerator/internal/account"
 	"github.com/gateway-fm/loadgenerator/internal/config"
 	"github.com/gateway-fm/loadgenerator/internal/execnode"
 )
@@ -751,3 +754,45 @@ func TestFetchNodeInfo_ChainIDFormats(t *testing.T) {
 
 // Ensure config.Config is used correctly (compile-time check)
 var _ = &config.Config{}
+
+// TestInitializeNonces_DowngradesAfterFailedTest is the regression test for
+// RD-892. Before the fix, Account.Resync used a "set if higher" guard that
+// kept a previous failed test's inflated local nonce instead of downgrading
+// to the builder's view, requiring a process restart to recover.
+//
+// This test simulates that exact scenario: local nonce sits at 1000 (from
+// a hypothetical prior catastrophic test), builder's pending view says 50.
+// After InitializeNonces, the local nonce MUST equal 50.
+func TestInitializeNonces_DowngradesAfterFailedTest(t *testing.T) {
+	mgr, err := account.NewManager(big.NewInt(42069), big.NewInt(1e9), false, slog.Default())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	accounts := mgr.GetAccounts()
+	if len(accounts) == 0 {
+		t.Fatal("manager has no built-in accounts")
+	}
+
+	const inflated = uint64(1000)
+	const chainPending = uint64(50)
+	for _, a := range accounts {
+		a.SetNonce(inflated)
+	}
+
+	mockBuilder := &mockRPCClient{
+		GetNonceFn: func(_ context.Context, _ string) (uint64, error) {
+			return chainPending, nil
+		},
+	}
+
+	if err := mgr.InitializeNonces(context.Background(), mockBuilder, len(accounts)); err != nil {
+		t.Fatalf("InitializeNonces: %v", err)
+	}
+
+	for i, a := range accounts {
+		if got := a.PeekNonce(); got != chainPending {
+			t.Errorf("account[%d].PeekNonce() = %d after InitializeNonces; want %d (downgrade from inflated %d)", i, got, chainPending, inflated)
+		}
+	}
+}

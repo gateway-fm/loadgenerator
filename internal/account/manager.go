@@ -71,9 +71,10 @@ func (m *Manager) GetAccountsFunded() int {
 }
 
 // InitializeNonces fetches initial nonces for the built-in accounts in parallel.
-// CRITICAL: Uses Resync to sync through builder (eth_getPendingNonce), ensuring
-// load generator and builder have the same nonce view. This prevents "nonce ahead"
-// errors when builder has cached nonces from previous tests.
+// CRITICAL: Uses ForceResync (not Resync) so the builder's view always wins on
+// test start. The plain Resync helper guards against downgrade to defend against
+// in-test races, but between runs that guard pins us to a previous failed test's
+// inflated counter and silently rejects every TX (RD-892).
 func (m *Manager) InitializeNonces(ctx context.Context, client rpc.Client, numAccounts int) error {
 	m.logger.Info("Initializing account nonces (parallel, through builder)...", slog.Int("count", numAccounts))
 
@@ -94,7 +95,7 @@ func (m *Manager) InitializeNonces(ctx context.Context, client rpc.Client, numAc
 			defer func() { <-sem }() // Release semaphore
 
 			account := m.accounts[idx]
-			if err := account.Resync(ctx, client); err != nil {
+			if err := account.ForceResync(ctx, client); err != nil {
 				select {
 				case errChan <- fmt.Errorf("account %d: %w", idx, err):
 				default:
@@ -146,7 +147,7 @@ func (m *Manager) InitializeNoncesFromChain(ctx context.Context, client rpc.Clie
 			defer func() { <-sem }()
 
 			account := all[idx]
-			if err := account.ResyncFromChain(ctx, client); err != nil {
+			if err := account.ForceResyncFromChain(ctx, client); err != nil {
 				select {
 				case errChan <- fmt.Errorf("account %d: %w", idx, err):
 				default:
@@ -167,9 +168,8 @@ func (m *Manager) InitializeNoncesFromChain(ctx context.Context, client rpc.Clie
 }
 
 // InitializeDynamicNonces fetches initial nonces for dynamic accounts in parallel.
-// CRITICAL: Uses Resync to sync through builder (eth_getPendingNonce), which also
-// populates the builder's nonce cache for these new accounts. This prevents cache
-// misses and RPC delays when the test starts.
+// CRITICAL: Uses ForceResync (not Resync) — see InitializeNonces for the reason
+// (RD-892: previous failed test must not pin local nonce above chain state).
 func (m *Manager) InitializeDynamicNonces(ctx context.Context, client rpc.Client) error {
 	count := len(m.dynamicAccounts)
 	m.logger.Info("Initializing nonces for dynamic accounts (parallel, through builder)",
@@ -192,7 +192,7 @@ func (m *Manager) InitializeDynamicNonces(ctx context.Context, client rpc.Client
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
 
-			if err := acc.Resync(ctx, client); err != nil {
+			if err := acc.ForceResync(ctx, client); err != nil {
 				select {
 				case errChan <- fmt.Errorf("dynamic account %d: %w", idx, err):
 				default:
