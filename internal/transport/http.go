@@ -466,6 +466,12 @@ func (s *Server) handleHistoryDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if this is a relaunch request (POST /history/{id}/relaunch)
+	if len(parts) > 1 && parts[1] == "relaunch" {
+		s.handleTestRelaunch(w, r, testID)
+		return
+	}
+
 	// Handle DELETE /history/{id}
 	if r.Method == http.MethodDelete {
 		if err := s.api.DeleteTestRun(testID); err != nil {
@@ -524,6 +530,50 @@ func (s *Server) handleHistoryDetail(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(detail)
+}
+
+// handleTestRelaunch handles POST /history/{id}/relaunch.
+// Loads the stored config from the referenced test run and starts a new test
+// with that exact configuration. This lets users keep a "backup plan" demo run
+// that survives any process or container restart — favorite the run, then
+// relaunch from history when needed (RD-893).
+func (s *Server) handleTestRelaunch(w http.ResponseWriter, r *http.Request, testID string) {
+	if r.Method != http.MethodPost {
+		s.writeJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	detail, err := s.api.GetTestRunDetail(testID)
+	if err != nil {
+		s.writeJSONError(w, "Failed to load test run: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if detail == nil || detail.Run == nil {
+		s.writeJSONError(w, "Test run not found", http.StatusNotFound)
+		return
+	}
+	if detail.Run.Config == nil {
+		s.writeJSONError(w, "Test run has no stored config and cannot be relaunched", http.StatusUnprocessableEntity)
+		return
+	}
+
+	req := *detail.Run.Config
+	if err := validateStartRequest(&req); err != nil {
+		s.writeJSONError(w, "Stored config failed validation: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	if err := s.api.StartTest(req); err != nil {
+		s.logger.Error("Failed to relaunch test", slog.String("source_id", testID), slog.String("error", err.Error()))
+		s.writeJSONError(w, "Failed to start test: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "started",
+		"sourceId": testID,
+	})
 }
 
 // handleTestTransactions handles GET /history/{id}/transactions.

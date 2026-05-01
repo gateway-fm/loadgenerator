@@ -286,6 +286,56 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /history/{id}/relaunch:
+    post:
+      tags: [Test History]
+      summary: Relaunch a previous test run
+      description: |
+        Starts a new test using the stored configuration of a previous run.
+        Useful for keeping a "backup plan" demo configuration that survives
+        process or container restarts: favorite the source run, then call
+        this endpoint to re-run it with identical settings.
+      operationId: relaunchTestRun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Source test run ID whose config will be used
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Test started successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: started
+                  sourceId:
+                    type: string
+                    description: ID of the test run whose config was used
+        '404':
+          description: Test run not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Source run has no stored config or stored config is invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to start the relaunched test
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /history/{id}/transactions:
     get:
       tags: [Test History]
