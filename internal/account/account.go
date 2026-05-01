@@ -170,6 +170,39 @@ func (a *Account) ResyncFromChain(ctx context.Context, client rpc.Client) error 
 	return nil
 }
 
+// ForceResync fetches the current nonce from the builder and overwrites local
+// state unconditionally. Unlike Resync, this can downgrade the local nonce.
+//
+// Use ONLY at test-start when no goroutines are reserving nonces — the in-test
+// "set if higher" guard exists to defend against concurrent reservers, but
+// between runs we MUST trust the builder's view, otherwise a previous failed
+// test's inflated local counter sticks forever (RD-892).
+func (a *Account) ForceResync(ctx context.Context, client rpc.Client) error {
+	nonce, err := client.GetNonce(ctx, a.Address.Hex())
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.nonce = nonce
+	a.freeNonces = a.freeNonces[:0]
+	a.mu.Unlock()
+	return nil
+}
+
+// ForceResyncFromChain is like ForceResync but reads the chain-confirmed nonce
+// directly, bypassing the builder cache. Use after a builder /reset-nonces.
+func (a *Account) ForceResyncFromChain(ctx context.Context, client rpc.Client) error {
+	nonce, err := client.GetConfirmedNonce(ctx, a.Address.Hex())
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.nonce = nonce
+	a.freeNonces = a.freeNonces[:0]
+	a.mu.Unlock()
+	return nil
+}
+
 // SetNonce sets the nonce value directly and clears the free list.
 // Prefer Resync for fetching from chain, or ReserveNonce for normal use.
 func (a *Account) SetNonce(nonce uint64) {
