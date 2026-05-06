@@ -293,12 +293,16 @@ func (d *Deployer) ProvisionLiquidity(ctx context.Context, deployer *account.Acc
 		return fmt.Errorf("get nonce: %w", err)
 	}
 
+	// Steps 1-4 MUST be confirmed on-chain before the mint in step 5.
+	// Using sendTxAndWaitForReceipt (not fire-and-forget sendTx) so the pool
+	// has non-zero balances and approvals when the liquidity mint executes.
+
 	// 1. Mint USDC to deployer
 	d.logger.Info("Minting USDC for liquidity...",
 		slog.String("amount", config.LiquidityUSDC.String()),
 	)
 	mintData := EncodeMint(deployer.Address, config.LiquidityUSDC)
-	if err := d.sendTx(ctx, deployer, contracts.USDC, mintData, nil, nonce); err != nil {
+	if err := d.sendTxAndWaitForReceipt(ctx, deployer, contracts.USDC, mintData, nil, nonce, "mintUSDC"); err != nil {
 		return fmt.Errorf("mint USDC: %w", err)
 	}
 	nonce++
@@ -307,7 +311,7 @@ func (d *Deployer) ProvisionLiquidity(ctx context.Context, deployer *account.Acc
 	d.logger.Info("Wrapping ETH to WETH...",
 		slog.String("amount", config.LiquidityWETH.String()),
 	)
-	if err := d.sendTx(ctx, deployer, contracts.WETH9, EncodeDeposit(), config.LiquidityWETH, nonce); err != nil {
+	if err := d.sendTxAndWaitForReceipt(ctx, deployer, contracts.WETH9, EncodeDeposit(), config.LiquidityWETH, nonce, "wrapETH"); err != nil {
 		return fmt.Errorf("wrap ETH: %w", err)
 	}
 	nonce++
@@ -315,15 +319,15 @@ func (d *Deployer) ProvisionLiquidity(ctx context.Context, deployer *account.Acc
 	// 3. Approve NFTPositionManager to spend WETH
 	d.logger.Info("Approving WETH for NFTPositionManager...")
 	approveWETH := EncodeApprove(contracts.NonfungiblePositionManager, MaxUint256)
-	if err := d.sendTx(ctx, deployer, contracts.WETH9, approveWETH, nil, nonce); err != nil {
+	if err := d.sendTxAndWaitForReceipt(ctx, deployer, contracts.WETH9, approveWETH, nil, nonce, "approveWETH"); err != nil {
 		return fmt.Errorf("approve WETH: %w", err)
 	}
 	nonce++
 
-	// 4. Approve NFTPositionManager to spend USDC - fire and forget (nonce ordering ensures execution order)
+	// 4. Approve NFTPositionManager to spend USDC
 	d.logger.Info("Approving USDC for NFTPositionManager...")
 	approveUSDC := EncodeApprove(contracts.NonfungiblePositionManager, MaxUint256)
-	if err := d.sendTx(ctx, deployer, contracts.USDC, approveUSDC, nil, nonce); err != nil {
+	if err := d.sendTxAndWaitForReceipt(ctx, deployer, contracts.USDC, approveUSDC, nil, nonce, "approveUSDC"); err != nil {
 		return fmt.Errorf("approve USDC for NFT position manager: %w", err)
 	}
 	nonce++
