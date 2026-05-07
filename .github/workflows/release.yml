@@ -38,6 +38,8 @@ jobs:
           images: gatewayfm/loadgenerator
           tags: |
             type=semver,pattern={{version}}
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=loadgenerator
             org.opencontainers.image.description=High-throughput transaction load generator for blockchain sequencers
