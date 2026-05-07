@@ -44,5 +44,4 @@ jobs:
           context: .
           push: true
           tags: |
-            gatewayfm/loadgenerator:latest
             gatewayfm/loadgenerator:${{ github.sha }}
