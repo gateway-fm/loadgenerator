@@ -219,14 +219,14 @@ queued := sender.SendAsync(ctx, txData, func(err error) {
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EXECUTION_LAYER` | reth | Execution layer: `reth`, `cdk-erigon`, `gravity-reth` |
+| `EXECUTION_LAYER` | reth | Execution layer: `reth`, `op-reth`, `cdk-erigon`, `gravity-reth` |
 | `BUILDER_RPC_URL` | http://block-builder:3000 | Transaction submission endpoint |
 | `L2_RPC_URL` | http://block-builder:3000 | L2 node for confirmations |
 | `L2_WS_URL` | ws://l2-reth:8546 | L2 WebSocket for block metrics |
 | `PRECONF_WS_URL` | ws://block-builder:3001/ws/preconfirmations | Preconfirmation WebSocket |
 | `LISTEN_ADDR` | :3001 | API listen address |
 | `DATABASE_PATH` | /data/loadgen.db | SQLite database path |
-| `BLOCK_TIME_MS` | 150 | Block interval in milliseconds |
+| `BLOCK_TIME_MS` | 250 | Block interval in milliseconds |
 
 ## API Response Format
 
