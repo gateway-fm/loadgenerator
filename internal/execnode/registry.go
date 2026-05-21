@@ -52,9 +52,23 @@ func DefaultRegistry() *Registry {
 	r.Register(OpRethCapabilities())
 	r.Register(GravityRethCapabilities())
 	r.Register(CDKErigonCapabilities())
+	r.Register(RethExtNativeCapabilities())
 	// Legacy alias: "reth" maps to op-reth
 	r.Register(RethCapabilities())
 	return r
+}
+
+// RethExtNativeCapabilities returns the capabilities for reth-ext running in
+// --dev mode with its own native txpool (no external block-builder, no
+// preconfirmations). Architecture: load-generator -> reth-ext:8545 directly.
+func RethExtNativeCapabilities() *ExecutionLayerCapabilities {
+	return &ExecutionLayerCapabilities{
+		Name:                     "reth-ext-native",
+		HasExternalBlockBuilder:  false,
+		SupportsPreconfirmations: false,
+		SupportsBuilderStatusAPI: false,
+		SupportsBlockMetricsWS:   false,
+	}
 }
 
 // OpRethCapabilities returns the capabilities for op-reth with external block-builder.
