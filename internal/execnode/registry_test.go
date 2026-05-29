@@ -116,8 +116,8 @@ func TestRegistryNames(t *testing.T) {
 	r := DefaultRegistry()
 	names := r.Names()
 
-	if len(names) != 4 {
-		t.Errorf("expected 4 registered names, got %d", len(names))
+	if len(names) != 5 {
+		t.Errorf("expected 5 registered names, got %d", len(names))
 	}
 
 	// Convert to map for easier lookup
@@ -126,7 +126,7 @@ func TestRegistryNames(t *testing.T) {
 		nameMap[n] = true
 	}
 
-	expected := []string{"reth", "op-reth", "gravity-reth", "cdk-erigon"}
+	expected := []string{"reth", "op-reth", "gravity-reth", "cdk-erigon", "reth-ext-native"}
 	for _, e := range expected {
 		if !nameMap[e] {
 			t.Errorf("expected %s to be in registry names", e)

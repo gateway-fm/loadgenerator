@@ -334,6 +334,12 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 				Address: lg.gasConsumerContract.Hex(),
 			})
 		}
+		if lg.nftContract != (common.Address{}) {
+			testRun.DeployedContracts = append(testRun.DeployedContracts, storage.DeployedContract{
+				Name:    "NFT",
+				Address: lg.nftContract.Hex(),
+			})
+		}
 		// Add Uniswap V3 contracts if deployed
 		if cb, ok := lg.txBuilderReg.GetComplexBuilder(types.TxTypeUniswapSwap); ok {
 			if uniswapBuilder, ok := cb.(*txbuilder.UniswapV3SwapBuilder); ok && uniswapBuilder.IsDeployed() {

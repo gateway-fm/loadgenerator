@@ -190,12 +190,14 @@ func TestTryRestoreCachedContracts_CacheHit(t *testing.T) {
 	acc := makeTestAccount(t)
 	erc20Addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	gasConsumerAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	nftAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 
 	cache := &mockCacheStorage{
 		LoadCachedContractsFn: func(ctx context.Context, chainID int64) ([]storage.CachedContract, error) {
 			return []storage.CachedContract{
 				{Name: "ERC20", Address: erc20Addr.Hex(), ChainID: chainID},
 				{Name: "GasConsumer", Address: gasConsumerAddr.Hex(), ChainID: chainID},
+				{Name: "NFT", Address: nftAddr.Hex(), ChainID: chainID},
 			}, nil
 		},
 	}
@@ -228,6 +230,9 @@ func TestTryRestoreCachedContracts_CacheHit(t *testing.T) {
 	}
 	if lg.gasConsumerContract != gasConsumerAddr {
 		t.Errorf("gasConsumerContract = %s, want %s", lg.gasConsumerContract.Hex(), gasConsumerAddr.Hex())
+	}
+	if lg.nftContract != nftAddr {
+		t.Errorf("nftContract = %s, want %s", lg.nftContract.Hex(), nftAddr.Hex())
 	}
 }
 
@@ -349,11 +354,12 @@ func TestSaveBaseContractsToCache(t *testing.T) {
 	lg.cacheStorage = cache
 	lg.erc20Contract = common.HexToAddress("0x1111111111111111111111111111111111111111")
 	lg.gasConsumerContract = common.HexToAddress("0x2222222222222222222222222222222222222222")
+	lg.nftContract = common.HexToAddress("0x3333333333333333333333333333333333333333")
 
 	lg.saveBaseContractsToCache(context.Background(), 42069)
 
-	if len(saved) != 2 {
-		t.Fatalf("expected 2 contracts saved, got %d", len(saved))
+	if len(saved) != 3 {
+		t.Fatalf("expected 3 contracts saved, got %d", len(saved))
 	}
 
 	names := map[string]bool{}
@@ -368,6 +374,9 @@ func TestSaveBaseContractsToCache(t *testing.T) {
 	}
 	if !names["GasConsumer"] {
 		t.Error("expected GasConsumer to be saved")
+	}
+	if !names["NFT"] {
+		t.Error("expected NFT to be saved")
 	}
 }
 
@@ -398,12 +407,14 @@ func TestEnsureContractsDeployed_WithCacheRestore(t *testing.T) {
 	acc := makeTestAccount(t)
 	erc20Addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	gasConsumerAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	nftAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 
 	cache := &mockCacheStorage{
 		LoadCachedContractsFn: func(ctx context.Context, chainID int64) ([]storage.CachedContract, error) {
 			return []storage.CachedContract{
 				{Name: "ERC20", Address: erc20Addr.Hex(), ChainID: chainID},
 				{Name: "GasConsumer", Address: gasConsumerAddr.Hex(), ChainID: chainID},
+				{Name: "NFT", Address: nftAddr.Hex(), ChainID: chainID},
 			}, nil
 		},
 	}
@@ -556,19 +567,21 @@ func TestTryRestoreCachedContracts_WithUniswap_FullRestore(t *testing.T) {
 	usdcAddr := common.HexToAddress("0x4444444444444444444444444444444444444444")
 	factoryAddr := common.HexToAddress("0x5555555555555555555555555555555555555555")
 	routerAddr := common.HexToAddress("0x6666666666666666666666666666666666666666")
-	nftAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	positionMgrAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
 	poolAddr := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	nftAddr := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
 	cache := &mockCacheStorage{
 		LoadCachedContractsFn: func(ctx context.Context, chainID int64) ([]storage.CachedContract, error) {
 			return []storage.CachedContract{
 				{Name: "ERC20", Address: erc20Addr.Hex(), ChainID: chainID},
 				{Name: "GasConsumer", Address: gasConsumerAddr.Hex(), ChainID: chainID},
+				{Name: "NFT", Address: nftAddr.Hex(), ChainID: chainID},
 				{Name: "uniswap:WETH9", Address: weth9Addr.Hex(), ChainID: chainID},
 				{Name: "uniswap:USDC", Address: usdcAddr.Hex(), ChainID: chainID},
 				{Name: "uniswap:Factory", Address: factoryAddr.Hex(), ChainID: chainID},
 				{Name: "uniswap:SwapRouter", Address: routerAddr.Hex(), ChainID: chainID},
-				{Name: "uniswap:NonfungiblePositionManager", Address: nftAddr.Hex(), ChainID: chainID},
+				{Name: "uniswap:NonfungiblePositionManager", Address: positionMgrAddr.Hex(), ChainID: chainID},
 				{Name: "uniswap:Pool", Address: poolAddr.Hex(), ChainID: chainID},
 			}, nil
 		},

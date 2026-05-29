@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/gateway-fm/loadgenerator/internal/config"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/ratelimit"
@@ -252,10 +254,10 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		lg.initPhase = types.InitPhaseDeployingContracts
 		lg.initProgress = "Deploying test contracts..."
 		if txTypeForDeploy == types.TxTypeUniswapSwap {
-			// Uniswap V3: 7 steps (WETH9, USDC, Factory, SwapRouter, NFTManager, Pool, Liquidity) + 2 base
-			lg.initContractsTotal = 9
+			// Uniswap V3: 7 steps (WETH9, USDC, Factory, SwapRouter, NFTManager, Pool, Liquidity) + 3 base
+			lg.initContractsTotal = 10
 		} else {
-			lg.initContractsTotal = 2 // ERC20, GasConsumer
+			lg.initContractsTotal = 3 // ERC20, GasConsumer, NFT
 		}
 	}
 
@@ -264,6 +266,43 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		return
 	}
 	// Note: initContractsDone is now updated incrementally via progress callbacks
+
+	// Pre-mint NFTs for erc721-transfer load tests (setup-only, not load-test traffic).
+	if req.TransactionType == types.TxTypeERC721Transfer && req.Erc721PreMint > 0 {
+		lg.contractsMu.RLock()
+		nftAddr := lg.nftContract
+		lg.contractsMu.RUnlock()
+
+		if nftAddr == (common.Address{}) {
+			lg.setError("nft contract address unavailable for pre-mint")
+			return
+		}
+
+		accounts := lg.accountMgr.GetAccounts()
+		if len(accounts) == 0 {
+			lg.setError("no accounts available for pre-mint")
+			return
+		}
+		minter := accounts[0]
+
+		lg.statusMu.Lock()
+		lg.initProgress = fmt.Sprintf("Pre-minting NFTs (0/%d)...", req.Erc721PreMint)
+		lg.statusMu.Unlock()
+
+		preMintProgress := func(minted, total int) {
+			lg.statusMu.Lock()
+			lg.initProgress = fmt.Sprintf("Pre-minting NFTs (%d/%d)...", minted, total)
+			lg.statusMu.Unlock()
+		}
+
+		preMintCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		if err := lg.deployer.PreMintNFTs(preMintCtx, minter, nftAddr, req.Erc721PreMint, preMintProgress); err != nil {
+			cancel()
+			lg.setError(fmt.Sprintf("failed to pre-mint NFTs: %v", err))
+			return
+		}
+		cancel()
+	}
 
 	// Create pattern
 	patternCfg := pattern.Config{
@@ -372,7 +411,10 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Create context
 	lg.ctx, lg.cancel = context.WithCancel(context.Background())
 
-	// Connect to preconf WebSocket if the execution layer supports it and URL is configured
+	// Connect to preconf WebSocket if the execution layer supports it and URL is configured.
+	// The chain-poller fallback (for execution layers without a preconf channel) is
+	// started later, after `testStartBlockNumber` has been recorded — otherwise the
+	// poller would have no anchor and would scan from block 0.
 	if lg.cfg.Capabilities.SupportsPreconfirmations && lg.cfg.PreconfWSURL != "" {
 		go lg.connectPreconfWS()
 	}
@@ -430,6 +472,14 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			lg.logger.Warn("failed to get start block number", "error", err)
 		}
 		cancel()
+	}
+
+	// Spawn the receipt-polling fallback for execution layers that don't
+	// provide a preconfirmation stream. Done here (not earlier) so the poller
+	// can anchor at `testStartBlockNumber` rather than scanning historical
+	// blocks.
+	if !lg.cfg.Capabilities.SupportsPreconfirmations {
+		go lg.connectChainPoller()
 	}
 
 	// Swap sender to privacy-routed client if privacy mode requested

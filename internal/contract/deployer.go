@@ -80,6 +80,7 @@ func (d *Deployer) DeployAllWithProgress(ctx context.Context, deployer *account.
 	}{
 		{"ERC20", txbuilder.ERC20Bytecode},
 		{"GasConsumer", txbuilder.GasConsumerBytecode},
+		{"NFT", txbuilder.NFTBytecode},
 	}
 
 	total := len(contracts)

@@ -251,6 +251,7 @@ type mockDeployer struct {
 	DeployAllWithProgressFn    func(ctx context.Context, deployer *account.Account, onProgress contract.ProgressCallback) (map[string]common.Address, error)
 	ValidateCachedContractsFn  func(ctx context.Context, cached map[string]string) (valid map[string]common.Address, invalid []string)
 	SetUseLegacyFn             func(useLegacy bool)
+	PreMintNFTsFn              func(ctx context.Context, minter *account.Account, nftAddr common.Address, count int, onProgress contract.PreMintProgress) error
 }
 
 func (m *mockDeployer) DeployAllWithProgress(ctx context.Context, deployer *account.Account, onProgress contract.ProgressCallback) (map[string]common.Address, error) {
@@ -269,6 +270,12 @@ func (m *mockDeployer) SetUseLegacy(useLegacy bool) {
 	if m.SetUseLegacyFn != nil {
 		m.SetUseLegacyFn(useLegacy)
 	}
+}
+func (m *mockDeployer) PreMintNFTs(ctx context.Context, minter *account.Account, nftAddr common.Address, count int, onProgress contract.PreMintProgress) error {
+	if m.PreMintNFTsFn != nil {
+		return m.PreMintNFTsFn(ctx, minter, nftAddr, count, onProgress)
+	}
+	return nil
 }
 
 // mockAccountManager implements AccountManager.
