@@ -62,7 +62,10 @@ func registerStart(s *server.MCPServer, client *Client) {
 			gomcp.Description("Test duration in seconds (1-3600)"),
 		),
 		gomcp.WithString("transaction_type",
-			gomcp.Description("TX type: eth-transfer (default), erc20-transfer, erc20-approve, uniswap-swap, storage-write, heavy-compute"),
+			gomcp.Description("TX type: eth-transfer (default), erc20-transfer, erc20-approve, erc721-transfer, uniswap-swap, storage-write, heavy-compute"),
+		),
+		gomcp.WithNumber("erc721_pre_mint",
+			gomcp.Description("ERC-721 only: mint this many NFTs from the deployer during setup before the transfer load test begins (0-100000). Only valid when transaction_type=erc721-transfer."),
 		),
 		gomcp.WithNumber("num_accounts",
 			gomcp.Description("Number of accounts to use (default: auto)"),
@@ -142,6 +145,9 @@ func registerStart(s *server.MCPServer, client *Client) {
 		}
 		if v := req.GetInt("adaptive_initial_rate", 0); v > 0 {
 			payload["adaptiveInitialRate"] = v
+		}
+		if v := req.GetInt("erc721_pre_mint", 0); v > 0 {
+			payload["erc721PreMint"] = v
 		}
 
 		_, err = client.Post("/v1/start", payload)

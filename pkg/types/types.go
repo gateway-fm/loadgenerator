@@ -20,12 +20,13 @@ const (
 type TransactionType string
 
 const (
-	TxTypeEthTransfer   TransactionType = "eth-transfer"
-	TxTypeERC20Transfer TransactionType = "erc20-transfer"
-	TxTypeERC20Approve  TransactionType = "erc20-approve"
-	TxTypeUniswapSwap   TransactionType = "uniswap-swap"
-	TxTypeStorageWrite  TransactionType = "storage-write"
-	TxTypeHeavyCompute  TransactionType = "heavy-compute"
+	TxTypeEthTransfer    TransactionType = "eth-transfer"
+	TxTypeERC20Transfer  TransactionType = "erc20-transfer"
+	TxTypeERC20Approve   TransactionType = "erc20-approve"
+	TxTypeERC721Transfer TransactionType = "erc721-transfer"
+	TxTypeUniswapSwap    TransactionType = "uniswap-swap"
+	TxTypeStorageWrite   TransactionType = "storage-write"
+	TxTypeHeavyCompute   TransactionType = "heavy-compute"
 )
 
 // TestStatus represents the current test state.
@@ -287,6 +288,11 @@ type StartTestRequest struct {
 
 	// Nonce gap healing — send no-op self-transfers to fill gaps during test
 	FixNonceGaps bool `json:"fixNonceGaps,omitempty"`
+
+	// ERC-721 pre-mint count: when transactionType=="erc721-transfer", mint this many
+	// NFTs from the deployer during the deploying-contracts phase, before the load test
+	// begins. Token IDs are sequential starting from 0. Zero = no pre-mint.
+	Erc721PreMint int `json:"erc721PreMint,omitempty"`
 }
 
 // PreconfEvent is the event received from the preconfirmation WebSocket.

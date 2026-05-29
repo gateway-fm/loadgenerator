@@ -39,14 +39,18 @@ var validPatterns = map[types.LoadPattern]bool{
 
 // validTxTypes contains all valid transaction types
 var validTxTypes = map[types.TransactionType]bool{
-	types.TxTypeEthTransfer:   true,
-	types.TxTypeERC20Transfer: true,
-	types.TxTypeERC20Approve:  true,
-	types.TxTypeUniswapSwap:   true,
-	types.TxTypeStorageWrite:  true,
-	types.TxTypeHeavyCompute:  true,
-	"":                        true, // Empty is valid (default)
+	types.TxTypeEthTransfer:    true,
+	types.TxTypeERC20Transfer:  true,
+	types.TxTypeERC20Approve:   true,
+	types.TxTypeERC721Transfer: true,
+	types.TxTypeUniswapSwap:    true,
+	types.TxTypeStorageWrite:   true,
+	types.TxTypeHeavyCompute:   true,
+	"":                         true, // Empty is valid (default)
 }
+
+// maxErc721PreMint caps the pre-mint count to keep setup bounded.
+const maxErc721PreMint = 100000
 
 // validateStartRequest validates the start test request parameters
 func validateStartRequest(req *types.StartTestRequest) error {
@@ -74,6 +78,17 @@ func validateStartRequest(req *types.StartTestRequest) error {
 	// TransactionType validation
 	if !validTxTypes[req.TransactionType] {
 		return fmt.Errorf("invalid transactionType: %s", req.TransactionType)
+	}
+
+	// ERC-721 pre-mint validation
+	if req.Erc721PreMint < 0 {
+		return fmt.Errorf("erc721PreMint cannot be negative, got %d", req.Erc721PreMint)
+	}
+	if req.Erc721PreMint > maxErc721PreMint {
+		return fmt.Errorf("erc721PreMint exceeds maximum of %d", maxErc721PreMint)
+	}
+	if req.Erc721PreMint > 0 && req.TransactionType != types.TxTypeERC721Transfer {
+		return fmt.Errorf("erc721PreMint only valid with transactionType=erc721-transfer")
 	}
 
 	// Pattern-specific validation
