@@ -111,6 +111,7 @@ func NewDefaultRegistry(recipient common.Address) *Registry {
 	r.Register(NewETHTransferBuilder(recipient))
 	r.Register(NewERC20TransferBuilder(recipient))
 	r.Register(NewERC20ApproveBuilder(recipient))
+	r.Register(NewERC721TransferBuilder())
 	r.Register(NewUniswapV3SwapBuilder()) // Real Uniswap V3 swaps
 	r.Register(NewStorageWriteBuilder())
 	r.Register(NewHeavyComputeBuilder())

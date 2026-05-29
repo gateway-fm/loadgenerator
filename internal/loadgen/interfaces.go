@@ -20,6 +20,7 @@ type ContractDeployer interface {
 	DeployAllWithProgress(ctx context.Context, deployer *account.Account, onProgress contract.ProgressCallback) (map[string]common.Address, error)
 	ValidateCachedContracts(ctx context.Context, cached map[string]string) (valid map[string]common.Address, invalid []string)
 	SetUseLegacy(useLegacy bool)
+	PreMintNFTs(ctx context.Context, minter *account.Account, nftAddr common.Address, count int, onProgress contract.PreMintProgress) error
 }
 
 // AccountManager manages test accounts, funding, and nonces.
