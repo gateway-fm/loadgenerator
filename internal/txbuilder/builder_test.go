@@ -92,6 +92,7 @@ func TestNewDefaultRegistry(t *testing.T) {
 		types.TxTypeEthTransfer,
 		types.TxTypeERC20Transfer,
 		types.TxTypeERC20Approve,
+		types.TxTypeERC721Transfer,
 		types.TxTypeUniswapSwap,
 		types.TxTypeStorageWrite,
 		types.TxTypeHeavyCompute,
