@@ -411,7 +411,10 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Create context
 	lg.ctx, lg.cancel = context.WithCancel(context.Background())
 
-	// Connect to preconf WebSocket if the execution layer supports it and URL is configured
+	// Connect to preconf WebSocket if the execution layer supports it and URL is configured.
+	// The chain-poller fallback (for execution layers without a preconf channel) is
+	// started later, after `testStartBlockNumber` has been recorded — otherwise the
+	// poller would have no anchor and would scan from block 0.
 	if lg.cfg.Capabilities.SupportsPreconfirmations && lg.cfg.PreconfWSURL != "" {
 		go lg.connectPreconfWS()
 	}
@@ -469,6 +472,14 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			lg.logger.Warn("failed to get start block number", "error", err)
 		}
 		cancel()
+	}
+
+	// Spawn the receipt-polling fallback for execution layers that don't
+	// provide a preconfirmation stream. Done here (not earlier) so the poller
+	// can anchor at `testStartBlockNumber` rather than scanning historical
+	// blocks.
+	if !lg.cfg.Capabilities.SupportsPreconfirmations {
+		go lg.connectChainPoller()
 	}
 
 	// Swap sender to privacy-routed client if privacy mode requested
