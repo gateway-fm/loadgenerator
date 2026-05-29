@@ -51,6 +51,7 @@ type LoadGenerator struct {
 	// Contract addresses
 	erc20Contract       common.Address
 	gasConsumerContract common.Address
+	nftContract         common.Address
 	contractsDeployed   bool
 	contractsMu         sync.RWMutex
 
