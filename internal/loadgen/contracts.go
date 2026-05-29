@@ -134,6 +134,7 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 
 		lg.erc20Contract = results["ERC20"]
 		lg.gasConsumerContract = results["GasConsumer"]
+		lg.nftContract = results["NFT"]
 		lg.contractsDeployed = true
 
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Transfer); err == nil {
@@ -141,6 +142,9 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		}
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Approve); err == nil {
 			builder.SetContractAddress(lg.erc20Contract)
+		}
+		if builder, err := lg.txBuilderReg.Get(types.TxTypeERC721Transfer); err == nil {
+			builder.SetContractAddress(lg.nftContract)
 		}
 		if builder, err := lg.txBuilderReg.Get(types.TxTypeStorageWrite); err == nil {
 			builder.SetContractAddress(lg.gasConsumerContract)
@@ -152,6 +156,7 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		lg.logger.Info("contracts deployed",
 			"erc20", lg.erc20Contract.Hex(),
 			"gasConsumer", lg.gasConsumerContract.Hex(),
+			"nft", lg.nftContract.Hex(),
 		)
 
 		// Cache base contract addresses
@@ -193,7 +198,8 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 	// Restore base contracts
 	erc20Addr, hasERC20 := valid["ERC20"]
 	gasConsumerAddr, hasGasConsumer := valid["GasConsumer"]
-	if !hasERC20 || !hasGasConsumer {
+	nftAddr, hasNFT := valid["NFT"]
+	if !hasERC20 || !hasGasConsumer || !hasNFT {
 		lg.logger.Info("base contracts not in cache, deploying fresh")
 		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
 		return false
@@ -201,6 +207,7 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 
 	lg.erc20Contract = erc20Addr
 	lg.gasConsumerContract = gasConsumerAddr
+	lg.nftContract = nftAddr
 	lg.contractsDeployed = true
 
 	if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Transfer); err == nil {
@@ -208,6 +215,9 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 	}
 	if builder, err := lg.txBuilderReg.Get(types.TxTypeERC20Approve); err == nil {
 		builder.SetContractAddress(lg.erc20Contract)
+	}
+	if builder, err := lg.txBuilderReg.Get(types.TxTypeERC721Transfer); err == nil {
+		builder.SetContractAddress(lg.nftContract)
 	}
 	if builder, err := lg.txBuilderReg.Get(types.TxTypeStorageWrite); err == nil {
 		builder.SetContractAddress(lg.gasConsumerContract)
@@ -219,6 +229,7 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 	lg.logger.Info("restored cached base contracts",
 		"erc20", lg.erc20Contract.Hex(),
 		"gasConsumer", lg.gasConsumerContract.Hex(),
+		"nft", lg.nftContract.Hex(),
 	)
 
 	// Restore Uniswap contracts if needed
@@ -330,6 +341,7 @@ func (lg *LoadGenerator) saveBaseContractsToCache(ctx context.Context, chainID i
 	contracts := []storage.CachedContract{
 		{Name: "ERC20", Address: lg.erc20Contract.Hex(), ChainID: chainID, CreatedAt: now},
 		{Name: "GasConsumer", Address: lg.gasConsumerContract.Hex(), ChainID: chainID, CreatedAt: now},
+		{Name: "NFT", Address: lg.nftContract.Hex(), ChainID: chainID, CreatedAt: now},
 	}
 	for _, c := range contracts {
 		if err := lg.cacheStorage.SaveCachedContract(ctx, c); err != nil {
