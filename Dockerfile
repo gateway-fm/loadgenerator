@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.11-alpine@sha256:89f71d90dff0d7f30316963b3c3b8bfe5fb96b94641b3258963ce0c7a21dedda AS builder
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go clean -cache && go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
 
 # Runtime stage
-FROM alpine:latest@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
 
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates curl
 
