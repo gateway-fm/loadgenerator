@@ -546,11 +546,14 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		cancel()
 	}
 
-	// Spawn the receipt-polling fallback for execution layers that don't
-	// provide a preconfirmation stream. Done here (not earlier) so the poller
-	// can anchor at `testStartBlockNumber` rather than scanning historical
-	// blocks.
-	if !lg.cfg.Capabilities.SupportsPreconfirmations {
+	// Spawn the receipt-polling fallback when no live preconfirmation stream is
+	// available — either the execution layer has no preconf channel, or it does
+	// but no preconf WS URL is configured (e.g. external/prod privacy mode, where
+	// the only RPC endpoint is the proxy and there is no builder preconf socket).
+	// Without this, such modes would have zero confirmation sources and report 0
+	// confirmed even though txs land on-chain. Started here (not earlier) so the
+	// poller anchors at `testStartBlockNumber` rather than scanning from block 0.
+	if !lg.cfg.Capabilities.SupportsPreconfirmations || lg.cfg.PreconfWSURL == "" {
 		go lg.connectChainPoller()
 	}
 
