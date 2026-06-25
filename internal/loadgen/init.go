@@ -207,6 +207,16 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		}
 	}
 
+	// EIP-1559 invariant: maxFeePerGas (feeCap) must be >= maxPriorityFeePerGas
+	// (tipCap), otherwise the node rejects the tx outright. On a quiet chain
+	// eth_gasPrice (and thus 2x it) can fall below the configured tip, which
+	// silently fails every transaction. Clamp the fee cap up to the tip.
+	if lg.gasFeeCap.Cmp(lg.gasTipCap) < 0 {
+		lg.logger.Warn("gasFeeCap below gasTipCap; raising to tipCap (EIP-1559 invariant)",
+			"oldFeeCap", lg.gasFeeCap, "tipCap", lg.gasTipCap)
+		lg.gasFeeCap = new(big.Int).Set(lg.gasTipCap)
+	}
+
 	// CRITICAL: Ensure gasFeeCap is above current baseFee to avoid silent rejections
 	// Query baseFee directly from latest block and ensure we're at least 2x above it
 	if baseFee, err := lg.l2Client.GetBaseFee(ctx); err == nil && baseFee > 0 {
