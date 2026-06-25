@@ -3,6 +3,7 @@ package loadgen
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"strings"
@@ -19,6 +20,44 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
+
+// privacyURL appends /rpc/{orgID} to the privacy proxy URL when an org id is
+// configured (PrivacyOrgID takes precedence over PrivacyOrgIDFile). The privacy
+// proxy requires the org in the path for users that belong to multiple orgs;
+// without it RBAC can't resolve a single org and denies every request.
+func privacyURL(cfg *config.Config, logger *slog.Logger) string {
+	url := cfg.PrivacyRPCURL
+	orgID := strings.TrimSpace(cfg.PrivacyOrgID)
+	if orgID == "" && cfg.PrivacyOrgIDFile != "" {
+		if b, err := os.ReadFile(cfg.PrivacyOrgIDFile); err == nil {
+			orgID = strings.TrimSpace(string(b))
+		} else {
+			logger.Warn("could not read privacy org-id file; using base URL", "path", cfg.PrivacyOrgIDFile, "error", err)
+		}
+	}
+	if orgID != "" {
+		url = strings.TrimRight(url, "/") + "/rpc/" + orgID
+	}
+	return url
+}
+
+// buildPrivacyClient builds a privacy-proxy-routed RPC client: routes to
+// privacyURL(cfg), attaches the Bearer token from PrivacyAuthTokenFile, and
+// wraps it in a NoBatch client (the proxy rejects JSON-RPC batches). Returns the
+// client and the resolved URL.
+func buildPrivacyClient(cfg *config.Config, logger *slog.Logger) (rpc.Client, string, error) {
+	url := privacyURL(cfg, logger)
+	pcfg := rpc.DefaultClientConfig(url)
+	pcfg.Logger = logger
+	if cfg.PrivacyAuthTokenFile != "" {
+		b, err := os.ReadFile(cfg.PrivacyAuthTokenFile)
+		if err != nil {
+			return nil, url, fmt.Errorf("read privacy auth token file %s: %w", cfg.PrivacyAuthTokenFile, err)
+		}
+		pcfg.AuthToken = strings.TrimSpace(string(b))
+	}
+	return rpc.NewNoBatchClient(rpc.NewHTTPClient(pcfg)), url, nil
+}
 
 func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Defer error handling - if we panic or error, set status to error
@@ -482,46 +521,30 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		go lg.connectChainPoller()
 	}
 
-	// Swap sender to privacy-routed client if privacy mode requested
-	if req.PrivacyMode && lg.cfg.PrivacyRPCURL != "" {
-		// Route through /rpc/{orgID} when an org-id file is configured. The privacy
-		// proxy requires the org in the path for users that belong to multiple orgs
-		// (e.g. its system "default" org plus the loadtest org); without it RBAC
-		// can't resolve a single org and denies every request. Read lazily here
-		// (not at startup) so the file written by external setup is available.
-		privacyURL := lg.cfg.PrivacyRPCURL
-		if lg.cfg.PrivacyOrgIDFile != "" {
-			if orgBytes, err := os.ReadFile(lg.cfg.PrivacyOrgIDFile); err == nil {
-				if orgID := strings.TrimSpace(string(orgBytes)); orgID != "" {
-					privacyURL = strings.TrimRight(privacyURL, "/") + "/rpc/" + orgID
-				}
-			} else {
-				lg.logger.Warn("could not read privacy org-id file; using base URL", "path", lg.cfg.PrivacyOrgIDFile, "error", err)
-			}
+	// Privacy routing. Three cases:
+	//   - route-all (external/prod): builder/l2/sender already point at the proxy
+	//     from startup (see NewLoadGenerator); nothing to swap per test.
+	//   - per-test (dev/bundled): route only sends through the proxy, reads stay
+	//     direct; re-read the token each test (it may be refreshed between runs).
+	//   - non-privacy: use the default (direct) sender.
+	switch {
+	case lg.cfg.PrivacyRouteAll && lg.cfg.PrivacyRPCURL != "":
+		// no-op: all clients are privacy-routed at startup
+	case req.PrivacyMode && lg.cfg.PrivacyRPCURL != "":
+		client, url, err := buildPrivacyClient(lg.cfg, lg.logger)
+		if err != nil {
+			lg.logger.Error("failed to build privacy client", "error", err)
+			lg.setError(fmt.Sprintf("privacy mode requires auth token: %v", err))
+			return
 		}
-		// Always re-read token file (token may have been refreshed between tests)
-		{
-			privacyCfg := rpc.DefaultClientConfig(privacyURL)
-			privacyCfg.Logger = lg.logger
-			if lg.cfg.PrivacyAuthTokenFile != "" {
-				tokenBytes, err := os.ReadFile(lg.cfg.PrivacyAuthTokenFile)
-				if err != nil {
-					lg.logger.Error("failed to read privacy auth token file", "path", lg.cfg.PrivacyAuthTokenFile, "error", err)
-					lg.setError(fmt.Sprintf("privacy mode requires auth token: %v", err))
-					return
-				}
-				privacyCfg.AuthToken = strings.TrimSpace(string(tokenBytes))
-			}
-			// Wrap in NoBatchClient — privacy proxy rejects JSON-RPC batch requests
-			lg.privacyBuilderClient = rpc.NewNoBatchClient(rpc.NewHTTPClient(privacyCfg))
-		}
+		lg.privacyBuilderClient = client
 		lg.sender = sender.New(sender.Config{
 			Client:      lg.privacyBuilderClient,
 			Concurrency: 2000,
 			Logger:      lg.logger,
 		})
-		lg.logger.Info("using privacy proxy for this test", "url", privacyURL)
-	} else {
+		lg.logger.Info("using privacy proxy for this test", "url", url)
+	default:
 		// Ensure we use the default sender (restore after a previous privacy test)
 		lg.sender = lg.defaultSender
 	}
