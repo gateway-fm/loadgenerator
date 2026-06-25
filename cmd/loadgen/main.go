@@ -97,6 +97,7 @@ func main() {
 		ExecutionLayer:       *executionLayer,
 		PrivacyRPCURL:        os.Getenv("PRIVACY_RPC_URL"),
 		PrivacyAuthTokenFile: os.Getenv("PRIVACY_AUTH_TOKEN_FILE"),
+		PrivacyOrgIDFile:     os.Getenv("PRIVACY_ORG_ID_FILE"),
 	}
 
 	cfg.Capabilities = execnode.DefaultRegistry().Get(cfg.ExecutionLayer)

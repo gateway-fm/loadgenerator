@@ -484,9 +484,24 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 
 	// Swap sender to privacy-routed client if privacy mode requested
 	if req.PrivacyMode && lg.cfg.PrivacyRPCURL != "" {
+		// Route through /rpc/{orgID} when an org-id file is configured. The privacy
+		// proxy requires the org in the path for users that belong to multiple orgs
+		// (e.g. its system "default" org plus the loadtest org); without it RBAC
+		// can't resolve a single org and denies every request. Read lazily here
+		// (not at startup) so the file written by external setup is available.
+		privacyURL := lg.cfg.PrivacyRPCURL
+		if lg.cfg.PrivacyOrgIDFile != "" {
+			if orgBytes, err := os.ReadFile(lg.cfg.PrivacyOrgIDFile); err == nil {
+				if orgID := strings.TrimSpace(string(orgBytes)); orgID != "" {
+					privacyURL = strings.TrimRight(privacyURL, "/") + "/rpc/" + orgID
+				}
+			} else {
+				lg.logger.Warn("could not read privacy org-id file; using base URL", "path", lg.cfg.PrivacyOrgIDFile, "error", err)
+			}
+		}
 		// Always re-read token file (token may have been refreshed between tests)
 		{
-			privacyCfg := rpc.DefaultClientConfig(lg.cfg.PrivacyRPCURL)
+			privacyCfg := rpc.DefaultClientConfig(privacyURL)
 			privacyCfg.Logger = lg.logger
 			if lg.cfg.PrivacyAuthTokenFile != "" {
 				tokenBytes, err := os.ReadFile(lg.cfg.PrivacyAuthTokenFile)
@@ -505,7 +520,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			Concurrency: 2000,
 			Logger:      lg.logger,
 		})
-		lg.logger.Info("using privacy proxy for this test", "url", lg.cfg.PrivacyRPCURL)
+		lg.logger.Info("using privacy proxy for this test", "url", privacyURL)
 	} else {
 		// Ensure we use the default sender (restore after a previous privacy test)
 		lg.sender = lg.defaultSender
