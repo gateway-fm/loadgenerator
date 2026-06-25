@@ -72,6 +72,29 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	lg.warnings = nil
 	lg.warningsMu.Unlock()
 
+	// Route-all privacy (external/prod): rebuild the privacy-routed clients from
+	// the token file at the START of each test, so a freshly-pasted/refreshed
+	// token is picked up without a restart. The proxy is the only RPC endpoint in
+	// this mode; nonce init, funding, and sends below all use the live
+	// lg.builderClient/l2Client, so rebuilding here (before nonce init) routes the
+	// whole test through the proxy with the current token.
+	if lg.cfg.PrivacyRouteAll && lg.cfg.PrivacyRPCURL != "" {
+		client, url, err := buildPrivacyClient(lg.cfg, lg.logger)
+		if err != nil {
+			lg.setError(fmt.Sprintf("privacy route-all requires auth token: %v", err))
+			return
+		}
+		lg.privacyBuilderClient = client
+		lg.builderClient = client
+		lg.l2Client = client
+		lg.sender = sender.New(sender.Config{
+			Client:      client,
+			Concurrency: 2000,
+			Logger:      lg.logger,
+		})
+		lg.logger.Info("privacy route-all: all RPC routed through proxy (current token)", "url", url)
+	}
+
 	// Set defaults
 	if req.TransactionType == "" {
 		req.TransactionType = types.TxTypeEthTransfer
