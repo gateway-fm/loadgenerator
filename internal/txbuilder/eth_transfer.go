@@ -37,7 +37,13 @@ func (b *ETHTransferBuilder) Build(params TxParams) (*types.Transaction, error) 
 	if params.ChainID == nil || params.ChainID.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("ChainID must be non-nil and non-zero")
 	}
-	return NewTransferTx(params.ChainID, params.Nonce, b.recipient, big.NewInt(1), b.GasLimit(), params.GasTipCap, params.GasFeeCap, nil, params.UseLegacy), nil
+	// 1 wei normally (a real value transfer); 0 in gasless mode, where the sender
+	// is an unfunded random account with no balance to move.
+	value := big.NewInt(1)
+	if params.Gasless {
+		value = big.NewInt(0)
+	}
+	return NewTransferTx(params.ChainID, params.Nonce, b.recipient, value, b.GasLimit(), params.GasTipCap, params.GasFeeCap, nil, params.UseLegacy), nil
 }
 
 // RequiresContract returns false - ETH transfer doesn't need a contract.

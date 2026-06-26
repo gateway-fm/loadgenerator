@@ -115,6 +115,10 @@ type LoadGenerator struct {
 	gasTipCap *big.Int // Priority fee (tip)
 	gasFeeCap *big.Int // Max fee per gas
 
+	// Gasless mode (set at test start): zero-fee chain, skip funding, send
+	// 0-value eth-transfers. See StartTestRequest.Gasless.
+	gasless bool
+
 	// Circuit breaker for failure detection
 	recentSends       int64 // atomic - sends in current window
 	recentFails       int64 // atomic - failures in current window

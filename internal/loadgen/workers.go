@@ -124,6 +124,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				GasFeeCap: gasFeeCap,
 				From:      acc.Address,
 				UseLegacy: lg.cfg.Capabilities != nil && lg.cfg.Capabilities.RequiresLegacyTx,
+				Gasless:   lg.gasless,
 			})
 			if err != nil {
 				lg.logger.Error("failed to build tx", "error", err)

@@ -20,6 +20,7 @@ type TxParams struct {
 	GasFeeCap *big.Int
 	From      common.Address // Sender address (needed for Uniswap swaps)
 	UseLegacy bool           // Use legacy (type 0) transactions instead of EIP-1559
+	Gasless   bool           // Zero-fee chain: send 0-value transfers (sender needs no balance)
 }
 
 // Builder builds transactions for a specific type.

@@ -286,6 +286,12 @@ type StartTestRequest struct {
 	// Privacy proxy mode
 	PrivacyMode bool `json:"privacyMode,omitempty"`
 
+	// Gasless mode: target chain has zero gas fees and self-authorizes senders by
+	// signature (eth_sendRawTransaction). Skips account funding, sends 0-value
+	// eth-transfers, and uses zero gas tip/fee caps. Supports eth-transfer only
+	// (contract types need a funded deployer).
+	Gasless bool `json:"gasless,omitempty"`
+
 	// Nonce gap healing — send no-op self-transfers to fill gaps during test
 	FixNonceGaps bool `json:"fixNonceGaps,omitempty"`
 
