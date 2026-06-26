@@ -3,6 +3,7 @@ package loadgen
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,85 @@ func (lg *LoadGenerator) recordTxConfirmed(txHash common.Hash, confirmedAt time.
 		// NOTE: Don't delete from pendingTxs here - we need confirmed entries for
 		// TX receipt verification at test end. The map is cleared in initBuffers.
 	}
+}
+
+// resolvePendingViaReceipts resolves each still-pending transaction by its
+// on-chain receipt, independent of the throughput block-window. A tx with a
+// successful receipt landed on-chain (typically a block or two after the window
+// closed) and is reclassified as confirmed; one with no receipt stays pending
+// and is later discarded. This separates per-tx success (receipt lookup) from
+// throughput measurement (the [start,end] block range), so late-but-included
+// txs are not mislabeled as discarded. Returns the number reclassified.
+//
+// Safe to count: a still-"pending" map entry was never touched by the poller (the
+// poller marks anything it sees "confirmed"), so its sent-time is still tracked
+// and RecordTxConfirmed increments the confirmed counter.
+func (lg *LoadGenerator) resolvePendingViaReceipts() uint64 {
+	if !lg.txLoggingEnabled || lg.l2Client == nil {
+		return 0
+	}
+
+	var pending []common.Hash
+	lg.pendingTxs.Range(func(key, value any) bool {
+		if e, ok := value.(*storage.TxLogEntry); ok && e.Status == "pending" {
+			if h, ok2 := key.(common.Hash); ok2 {
+				pending = append(pending, h)
+			}
+		}
+		return true
+	})
+	if len(pending) == 0 {
+		return 0
+	}
+
+	lg.logger.Info("resolving pending txs via on-chain receipts", "count", len(pending))
+	lg.statusMu.Lock()
+	lg.verifyProgress = fmt.Sprintf("Resolving %d pending transactions via receipts...", len(pending))
+	lg.statusMu.Unlock()
+
+	const workers = 16
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var resolved, notFound, errored, reverted uint64
+	now := time.Now()
+
+	for _, h := range pending {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(hash common.Hash) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			receipt, err := lg.l2Client.GetTransactionReceipt(ctx, hash.Hex())
+			switch {
+			case err != nil:
+				atomic.AddUint64(&errored, 1)
+				return // lookup failed -> stays pending -> discarded
+			case receipt == nil:
+				atomic.AddUint64(&notFound, 1)
+				return // not on-chain -> genuinely pending/dropped -> discarded
+			case receipt.Status != 1:
+				atomic.AddUint64(&reverted, 1)
+				return // landed but reverted -> not a success
+			}
+			// On-chain and successful: count it as a (late) confirmation, mirroring
+			// the chain poller's confirmation path.
+			lg.metricsCol.RecordTxConfirmed(hash, now)
+			lg.recordTxConfirmed(hash, now)
+			metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+			atomic.AddUint64(&resolved, 1)
+		}(h)
+	}
+	wg.Wait()
+	lg.logger.Info("pending-tx receipt resolution complete",
+		"checked", len(pending),
+		"confirmedLate", resolved,
+		"notOnChain", notFound,
+		"reverted", reverted,
+		"lookupErrors", errored)
+	return resolved
 }
 
 // recordTxPreconfirmed updates a transaction with preconfirmation time (non-blocking).

@@ -527,6 +527,14 @@ func (lg *LoadGenerator) StopTest() {
 	}
 	lg.l2WsConnMu.Unlock()
 
+	// Resolve still-pending txs by their on-chain receipt, independent of the
+	// throughput block-window: a tx that landed just after our cutoff becomes
+	// confirmed, not discarded. Only txs with no receipt remain to be discarded.
+	if lateConfirmed := lg.resolvePendingViaReceipts(); lateConfirmed > 0 {
+		lg.logger.Info("reclassified late-landing txs as confirmed via receipt lookup",
+			"lateConfirmed", lateConfirmed)
+	}
+
 	// Finalize pending transactions: mark remaining as discarded
 	lg.discardedCount = lg.finalizePendingTxs()
 	if lg.discardedCount > 0 {
