@@ -32,6 +32,9 @@ type Config struct {
 
 	PrivacyRPCURL        string // Privacy proxy RPC URL (optional)
 	PrivacyAuthTokenFile string // Path to file containing JWT Bearer token
+	PrivacyOrgIDFile     string // Path to file with the org UUID to route through (/rpc/{org}); for multi-org users
+	PrivacyOrgID         string // Org UUID to route through (direct value; takes precedence over PrivacyOrgIDFile)
+	PrivacyRouteAll      bool   // Route ALL RPC (nonce/funding/sends/receipts/verify) through the proxy — external/prod mode
 
 	// Capabilities holds the resolved execution layer capabilities.
 	// This is populated automatically based on ExecutionLayer.
@@ -192,6 +195,15 @@ func Load() (*Config, *CLIConfig, error) {
 	}
 	if v := os.Getenv("PRIVACY_AUTH_TOKEN_FILE"); v != "" {
 		cfg.PrivacyAuthTokenFile = v
+	}
+	if v := os.Getenv("PRIVACY_ORG_ID_FILE"); v != "" {
+		cfg.PrivacyOrgIDFile = v
+	}
+	if v := os.Getenv("PRIVACY_ORG_ID"); v != "" {
+		cfg.PrivacyOrgID = v
+	}
+	if v := os.Getenv("PRIVACY_ROUTE_ALL"); v == "true" || v == "1" {
+		cfg.PrivacyRouteAll = true
 	}
 
 	// Define command-line flags

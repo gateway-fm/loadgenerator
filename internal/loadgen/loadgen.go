@@ -277,16 +277,37 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	}
 	lg.txBuilderReg = txbuilder.NewDefaultRegistry(recipient)
 
-	// Create default RPC clients if not injected
+	// Create default RPC clients if not injected. In route-all (external/prod)
+	// privacy mode the proxy is the only RPC endpoint, so build the builder and
+	// L2 clients privacy-routed (proxy URL + token + NoBatch) from the start —
+	// every consumer (nonce, funding, sends, verification) then goes through it.
+	routeAllPrivacy := cfg.PrivacyRouteAll && cfg.PrivacyRPCURL != ""
 	if lg.builderClient == nil {
-		builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
-		builderCfg.Logger = logger
-		lg.builderClient = rpc.NewHTTPClient(builderCfg)
+		if routeAllPrivacy {
+			c, url, err := buildPrivacyClient(cfg, logger)
+			if err != nil {
+				return nil, fmt.Errorf("privacy route-all builder client: %w", err)
+			}
+			lg.builderClient = c
+			logger.Info("privacy route-all: all RPC routed through privacy proxy", "url", url)
+		} else {
+			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
+			builderCfg.Logger = logger
+			lg.builderClient = rpc.NewHTTPClient(builderCfg)
+		}
 	}
 	if lg.l2Client == nil {
-		l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
-		l2Cfg.Logger = logger
-		lg.l2Client = rpc.NewHTTPClient(l2Cfg)
+		if routeAllPrivacy {
+			c, _, err := buildPrivacyClient(cfg, logger)
+			if err != nil {
+				return nil, fmt.Errorf("privacy route-all l2 client: %w", err)
+			}
+			lg.l2Client = c
+		} else {
+			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
+			l2Cfg.Logger = logger
+			lg.l2Client = rpc.NewHTTPClient(l2Cfg)
+		}
 	}
 
 	// Log privacy proxy availability (client created lazily when a privacy-mode test starts,
