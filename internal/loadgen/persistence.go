@@ -92,26 +92,52 @@ func (lg *LoadGenerator) resolvePendingViaReceipts() uint64 {
 	lg.verifyProgress = fmt.Sprintf("Resolving %d pending transactions via receipts...", len(pending))
 	lg.statusMu.Unlock()
 
+	// Abortable: a force stop (the Stop button) cancels resolveCtx so in-flight
+	// receipt lookups return immediately, and the loop below skips the rest — so
+	// hitting Stop mid-resolution ends it promptly instead of running to completion.
+	resolveCtx, cancelAll := context.WithCancel(context.Background())
+	defer cancelAll()
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-resolveCtx.Done():
+				return
+			case <-ticker.C:
+				if atomic.LoadInt32(&lg.forceStop) == 1 {
+					cancelAll()
+					return
+				}
+			}
+		}
+	}()
+
 	const workers = 16
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
-	var resolved, notFound, errored, reverted uint64
+	var resolved, notFound, errored, reverted, aborted uint64
 	now := time.Now()
 
 	for _, h := range pending {
+		if atomic.LoadInt32(&lg.forceStop) == 1 {
+			aborted++ // force stop: skip remaining lookups (loop is single-threaded)
+			continue
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(hash common.Hash) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Child of resolveCtx so a force stop cancels in-flight lookups.
+			ctx, cancel := context.WithTimeout(resolveCtx, 5*time.Second)
 			defer cancel()
 			receipt, err := lg.l2Client.GetTransactionReceipt(ctx, hash.Hex())
 			switch {
 			case err != nil:
 				atomic.AddUint64(&errored, 1)
-				return // lookup failed -> stays pending -> discarded
+				return // lookup failed/aborted -> stays pending -> discarded
 			case receipt == nil:
 				atomic.AddUint64(&notFound, 1)
 				return // not on-chain -> genuinely pending/dropped -> discarded
@@ -133,7 +159,8 @@ func (lg *LoadGenerator) resolvePendingViaReceipts() uint64 {
 		"confirmedLate", resolved,
 		"notOnChain", notFound,
 		"reverted", reverted,
-		"lookupErrors", errored)
+		"lookupErrors", errored,
+		"abortedByStop", aborted)
 	return resolved
 }
 
