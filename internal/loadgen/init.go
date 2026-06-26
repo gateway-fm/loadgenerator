@@ -471,6 +471,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	atomic.StoreInt64(&lg.peakRate, 0)
 	atomic.StoreInt64(&lg.pendingCount, 0)
 	atomic.StoreInt32(&lg.stopping, 0)
+	atomic.StoreInt32(&lg.forceStop, 0)
 
 	// Reset metrics
 	lg.metricsCol.Reset()

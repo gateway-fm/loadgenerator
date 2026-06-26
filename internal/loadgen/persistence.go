@@ -250,8 +250,15 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 		avgFillRate = fillRateSum / float64(fillRateCount)
 	}
 
-	// Get on-chain verification metrics by querying blocks
-	onChainMetrics := lg.calculateOnChainMetrics(ctx)
+	// Get on-chain verification metrics by querying blocks. Skipped on a force
+	// stop — the user aborted the run, so we don't scan the chain; the live
+	// counts are persisted as-is.
+	var onChainMetrics onChainMetricsResult
+	if atomic.LoadInt32(&lg.forceStop) == 1 {
+		lg.logger.Info("force stop: skipping on-chain verification")
+	} else {
+		onChainMetrics = lg.calculateOnChainMetrics(ctx)
+	}
 
 	// Fallback: If time series block metrics are all 0 (WebSocket failed), use on-chain metrics
 	if totalBlocks == 0 && totalGasUsed == 0 && onChainMetrics.firstBlock > 0 && onChainMetrics.lastBlock >= onChainMetrics.firstBlock {
@@ -282,7 +289,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 	// including those that were "pending" from our tracking perspective (confirmation notification
 	// not yet received when test stopped). If we sent N TXs and on-chain shows N, that's a match.
 	var verificationResult *storage.VerificationResult
-	if lg.l2Client != nil {
+	if lg.l2Client != nil && atomic.LoadInt32(&lg.forceStop) == 0 {
 		// Check if we have incremental verification snapshots
 		incrementalSnapshots := lg.getIncrementalSnapshots()
 

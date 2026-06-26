@@ -554,7 +554,7 @@ func (lg *LoadGenerator) completionWatcher() {
 		case <-ticker.C:
 			elapsed := time.Since(lg.startTime)
 			if elapsed >= lg.currentDuration {
-				lg.StopTest()
+				lg.stopTest() // natural completion: run full confirmation/verification
 				return
 			}
 		}
