@@ -291,14 +291,24 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	// L2 clients privacy-routed (proxy URL + token + NoBatch) from the start —
 	// every consumer (nonce, funding, sends, verification) then goes through it.
 	routeAllPrivacy := cfg.PrivacyRouteAll && cfg.PrivacyRPCURL != ""
-	if lg.builderClient == nil {
-		if routeAllPrivacy {
-			c, url, err := buildPrivacyClient(cfg, logger)
-			if err != nil {
-				return nil, fmt.Errorf("privacy route-all builder client: %w", err)
-			}
-			lg.builderClient = c
+	// In route-all mode try to build the privacy-routed client now, but tolerate a
+	// missing/unreadable auth token: in the standalone/paste flow the token arrives
+	// later (pasted in the dashboard), and runInitialization rebuilds the privacy
+	// client at the start of each test. So fall back to plain clients here if it
+	// isn't ready yet, rather than failing to start. One client instance is shared
+	// across builder/l2 (matching the route-all rebuild in runInitialization).
+	var routeAllClient rpc.Client
+	if routeAllPrivacy {
+		if c, url, err := buildPrivacyClient(cfg, logger); err == nil {
+			routeAllClient = c
 			logger.Info("privacy route-all: all RPC routed through privacy proxy", "url", url)
+		} else {
+			logger.Warn("privacy route-all client deferred until test start (auth token not available yet)", "error", err)
+		}
+	}
+	if lg.builderClient == nil {
+		if routeAllClient != nil {
+			lg.builderClient = routeAllClient
 		} else {
 			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
 			builderCfg.Logger = logger
@@ -306,12 +316,8 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		}
 	}
 	if lg.l2Client == nil {
-		if routeAllPrivacy {
-			c, _, err := buildPrivacyClient(cfg, logger)
-			if err != nil {
-				return nil, fmt.Errorf("privacy route-all l2 client: %w", err)
-			}
-			lg.l2Client = c
+		if routeAllClient != nil {
+			lg.l2Client = routeAllClient
 		} else {
 			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
 			l2Cfg.Logger = logger
