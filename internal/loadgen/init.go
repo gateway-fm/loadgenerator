@@ -95,6 +95,32 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		lg.logger.Info("privacy route-all: all RPC routed through proxy (current token)", "url", url)
 	}
 
+	// Auto-detect the chain's actual chainId and adopt it. The load generator
+	// signs every transaction with cfg.ChainID; against an external chain
+	// (route-all / gasless mode) a stale default (e.g. the local 42069) produces
+	// signatures the chain rejects as invalid for the wrong chain — silently
+	// failing every send. Querying eth_chainId here makes external runs work
+	// without the operator having to know the chain's id; on the bundled chain
+	// the reported id matches the default, so this is a no-op there. Best-effort:
+	// on query failure we keep the configured id.
+	{
+		cidCtx, cidCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if raw, err := lg.l2Client.Call(cidCtx, "eth_chainId", nil); err == nil {
+			s := strings.TrimPrefix(strings.Trim(string(raw), "\""), "0x")
+			if v, ok := new(big.Int).SetString(s, 16); ok && v.Sign() > 0 {
+				if detected := v.Int64(); detected != lg.cfg.ChainID {
+					lg.logger.Warn("chainId mismatch: adopting the chain's reported chainId",
+						"configured", lg.cfg.ChainID, "detected", detected)
+					lg.cfg.ChainID = detected
+				}
+			}
+		} else {
+			lg.logger.Warn("failed to query eth_chainId; using configured chainId",
+				"chainId", lg.cfg.ChainID, "error", err)
+		}
+		cidCancel()
+	}
+
 	// Set defaults
 	if req.TransactionType == "" {
 		req.TransactionType = types.TxTypeEthTransfer
