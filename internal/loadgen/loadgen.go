@@ -182,6 +182,7 @@ type LoadGenerator struct {
 	peakTxPerSec       float64           // Peak rolling TX/s observed during test
 	lastTxPerSec       float64           // Last calculated TX/s (frozen when test ends)
 	lastBlockTime      time.Time
+	lastBlockInterval  time.Duration // Most recent observed block interval (poller path; sizes the grace period)
 	lastBlockNumber    uint64
 	firstBlockNumber   uint64 // First block seen during test (from WebSocket)
 	lastRecordedBlock  uint64 // Last block added to blockMetrics (for deduplication)
@@ -466,9 +467,30 @@ func (lg *LoadGenerator) StopTest() {
 		cancel()
 	}
 
-	// Grace period: wait for late confirmation events before closing WebSocket
-	// This allows preconf events still in flight to be processed
-	const confirmationGracePeriod = 3 * time.Second
+	// Grace period: wait for late confirmations before closing.
+	//
+	// With a preconfirmation WebSocket, confirmations arrive near-instantly, so a
+	// short fixed window suffices. On the chain-poller path (external/gasless, no
+	// preconf), confirmations are observed by polling blocks over HTTP, which lags
+	// the head — the tail of a run needs several block intervals to be seen.
+	// Scale the grace to the observed block cadence so those late-but-successful
+	// txs land in "confirmed", not "discarded". (They never count as "failed".)
+	confirmationGracePeriod := 3 * time.Second
+	if lg.cfg.PreconfWSURL == "" {
+		lg.blockMetricsMu.Lock()
+		interval := lg.lastBlockInterval
+		lg.blockMetricsMu.Unlock()
+		if interval <= 0 {
+			interval = 2 * time.Second // no cadence observed yet; assume a slow-ish chain
+		}
+		confirmationGracePeriod = 6 * interval
+		if confirmationGracePeriod < 6*time.Second {
+			confirmationGracePeriod = 6 * time.Second
+		}
+		if confirmationGracePeriod > 30*time.Second {
+			confirmationGracePeriod = 30 * time.Second
+		}
+	}
 	pendingBefore := lg.countPendingTxs()
 	if pendingBefore > 0 {
 		lg.logger.Info("waiting for late confirmations",

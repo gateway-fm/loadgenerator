@@ -216,6 +216,7 @@ func (lg *LoadGenerator) recordPolledBlockMetrics(block *rpc.Block) {
 		})
 		lg.rollingGasWindow = append(lg.rollingGasWindow, rollingGasPoint{timestamp: ts, gasUsed: block.GasUsed})
 		lg.rollingTxWindow = append(lg.rollingTxWindow, rollingTxPoint{timestamp: ts, txCount: txCount})
+		lg.lastBlockInterval = blockTime // observed cadence; sizes the end-of-test grace period
 	}
 	lg.lastRecordedBlock = block.Number
 	lg.lastBlockTime = ts

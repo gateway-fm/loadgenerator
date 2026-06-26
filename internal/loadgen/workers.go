@@ -2,6 +2,7 @@ package loadgen
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -202,8 +203,16 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			callback := func(sendErr error) {
 				if sendErr != nil {
 					nonceVal.Rollback()
-					lg.metricsCol.RecordTxFailed("send")
 					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+					// A context cancellation means the test ended while this send
+					// was in flight — the request was aborted at the boundary, not
+					// rejected by the chain/proxy. Don't count it as a failure or
+					// trip the circuit breaker; it falls into "discarded" instead.
+					if errors.Is(sendErr, context.Canceled) {
+						lg.logger.Debug("async send canceled at shutdown", "txHash", txHash.Hex())
+						return
+					}
+					lg.metricsCol.RecordTxFailed("send")
 					atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
 					lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
 				} else {
