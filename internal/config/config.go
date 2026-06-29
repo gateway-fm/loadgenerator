@@ -36,6 +36,11 @@ type Config struct {
 	PrivacyOrgID         string // Org UUID to route through (direct value; takes precedence over PrivacyOrgIDFile)
 	PrivacyRouteAll      bool   // Route ALL RPC (nonce/funding/sends/receipts/verify) through the proxy — external/prod mode
 
+	// Gasless: target chain has zero gas fees and self-authorizes senders by
+	// signature. Default for tests; the per-test request flag can also enable it.
+	// Skips funding, sends 0-value eth-transfers, uses zero gas tip/fee caps.
+	Gasless bool
+
 	// Capabilities holds the resolved execution layer capabilities.
 	// This is populated automatically based on ExecutionLayer.
 	Capabilities *execnode.ExecutionLayerCapabilities

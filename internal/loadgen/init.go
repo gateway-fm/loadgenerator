@@ -95,11 +95,50 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		lg.logger.Info("privacy route-all: all RPC routed through proxy (current token)", "url", url)
 	}
 
+	// Auto-detect the chain's actual chainId and adopt it. The load generator
+	// signs every transaction with cfg.ChainID; against an external chain
+	// (route-all / gasless mode) a stale default (e.g. the local 42069) produces
+	// signatures the chain rejects as invalid for the wrong chain — silently
+	// failing every send. Querying eth_chainId here makes external runs work
+	// without the operator having to know the chain's id; on the bundled chain
+	// the reported id matches the default, so this is a no-op there. Best-effort:
+	// on query failure we keep the configured id.
+	{
+		cidCtx, cidCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if raw, err := lg.l2Client.Call(cidCtx, "eth_chainId", nil); err == nil {
+			s := strings.TrimPrefix(strings.Trim(string(raw), "\""), "0x")
+			if v, ok := new(big.Int).SetString(s, 16); ok && v.Sign() > 0 {
+				if detected := v.Int64(); detected != lg.cfg.ChainID {
+					lg.logger.Warn("chainId mismatch: adopting the chain's reported chainId",
+						"configured", lg.cfg.ChainID, "detected", detected)
+					lg.cfg.ChainID = detected
+				}
+			}
+		} else {
+			lg.logger.Warn("failed to query eth_chainId; using configured chainId",
+				"chainId", lg.cfg.ChainID, "error", err)
+		}
+		cidCancel()
+	}
+
 	// Set defaults
 	if req.TransactionType == "" {
 		req.TransactionType = types.TxTypeEthTransfer
 	}
 	lg.currentTxType = req.TransactionType
+
+	// Gasless mode: zero-fee chain that self-authorizes senders by signature, so
+	// we skip funding and send 0-value eth-transfers from unfunded random accounts.
+	// May be enabled per-test (request) or globally (GASLESS env). Only eth-transfer
+	// is supported — contract types need a funded deployer and on-chain token state.
+	lg.gasless = req.Gasless || lg.cfg.Gasless
+	if lg.gasless {
+		if req.TransactionType != types.TxTypeEthTransfer || req.Pattern == types.PatternRealistic {
+			lg.setError("gasless mode supports the eth-transfer transaction type only (contract types require a funded deployer)")
+			return
+		}
+		lg.logger.Info("gasless mode enabled: skipping funding, sending 0-value eth-transfers with zero gas")
+	}
 
 	// Auto-calculate required accounts based on target TPS
 	// Formula: accounts = targetTPS * blockTimeSec * safetyMargin
@@ -174,9 +213,12 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		dynamicCount := numAccounts - len(accounts)
 		chainID := lg.cfg.ChainID
 
-		// Try warm start from cached accounts
+		// Try warm start from cached accounts. Skipped in gasless mode: cached
+		// accounts always read zero balance on a zero-fee chain, which the warm
+		// path treats as a re-genesis and wipes anyway — and there's no funding
+		// to preserve, so generating fresh accounts is simpler.
 		warmStartOK := false
-		if lg.cacheStorage != nil {
+		if lg.cacheStorage != nil && !lg.gasless {
 			warmStartOK = lg.tryWarmStartAccounts(dynamicCount, chainID)
 		}
 
@@ -192,41 +234,49 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 			}
 			lg.initAccountsGen = dynamicCount
 
-			if err := lg.resetBuilderNonces(); err != nil {
-				lg.setError(fmt.Sprintf("failed to reset builder nonces: %v (cannot start test with stale cache)", err))
-				return
-			}
-
-			lg.initPhase = types.InitPhaseFundingAccts
-			lg.initFundingTotal = dynamicCount
-			lg.initProgress = fmt.Sprintf("Funding %d accounts from faucet...", dynamicCount)
-			lg.logger.Info("funding dynamic accounts from faucet")
-
 			fundCtx, fundCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer fundCancel()
 
-			if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.builderClient, lg.l2Client); err != nil {
-				lg.logger.Warn("failed to fund some dynamic accounts", "error", err)
-			}
-			lg.initFundingSent = lg.accountMgr.GetAccountsFunded()
-			if lg.initFundingSent == 0 {
-				lg.setError(fmt.Sprintf("failed to fund any accounts (0/%d funded) - cannot start test", dynamicCount))
-				return
-			}
+			if lg.gasless {
+				// Zero-fee chain: no faucet funding. Random accounts send 0-value,
+				// zero-gas transfers immediately, self-authorized by their signature.
+				// Also skip the builder-nonce reset (a bundled-builder concern that
+				// has no meaning against an external gasless chain).
+				lg.logger.Info("gasless: skipping builder-nonce reset and account funding", "accounts", dynamicCount)
+			} else {
+				if err := lg.resetBuilderNonces(); err != nil {
+					lg.setError(fmt.Sprintf("failed to reset builder nonces: %v (cannot start test with stale cache)", err))
+					return
+				}
 
-			lg.initPhase = types.InitPhaseWaitingForFunding
-			fundedCount := lg.accountMgr.GetAccountsFunded()
-			blocksNeeded := (fundedCount / 4000) + 3
-			waitTime := time.Duration(blocksNeeded) * time.Second
-			if waitTime < 5*time.Second {
-				waitTime = 5 * time.Second
+				lg.initPhase = types.InitPhaseFundingAccts
+				lg.initFundingTotal = dynamicCount
+				lg.initProgress = fmt.Sprintf("Funding %d accounts from faucet...", dynamicCount)
+				lg.logger.Info("funding dynamic accounts from faucet")
+
+				if err := lg.accountMgr.FundDynamicAccounts(fundCtx, lg.builderClient, lg.l2Client); err != nil {
+					lg.logger.Warn("failed to fund some dynamic accounts", "error", err)
+				}
+				lg.initFundingSent = lg.accountMgr.GetAccountsFunded()
+				if lg.initFundingSent == 0 {
+					lg.setError(fmt.Sprintf("failed to fund any accounts (0/%d funded) - cannot start test", dynamicCount))
+					return
+				}
+
+				lg.initPhase = types.InitPhaseWaitingForFunding
+				fundedCount := lg.accountMgr.GetAccountsFunded()
+				blocksNeeded := (fundedCount / 4000) + 3
+				waitTime := time.Duration(blocksNeeded) * time.Second
+				if waitTime < 5*time.Second {
+					waitTime = 5 * time.Second
+				}
+				lg.initProgress = fmt.Sprintf("Waiting for %d funding TXs to be included (~%ds)...", fundedCount, int(waitTime.Seconds()))
+				lg.logger.Info("waiting for funding transactions to be included",
+					"fundedAccounts", fundedCount,
+					"blocksNeeded", blocksNeeded,
+					"waitTime", waitTime)
+				time.Sleep(waitTime)
 			}
-			lg.initProgress = fmt.Sprintf("Waiting for %d funding TXs to be included (~%ds)...", fundedCount, int(waitTime.Seconds()))
-			lg.logger.Info("waiting for funding transactions to be included",
-				"fundedAccounts", fundedCount,
-				"blocksNeeded", blocksNeeded,
-				"waitTime", waitTime)
-			time.Sleep(waitTime)
 
 			lg.initPhase = types.InitPhaseInitNonces
 			lg.initProgress = "Initializing nonces for dynamic accounts..."
@@ -253,57 +303,67 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	}
 
 	// Set up EIP-1559 gas pricing
-	lg.gasTipCap = big.NewInt(lg.cfg.GasTipCap)
-	if lg.cfg.GasFeeCap > 0 {
-		// Explicit fee cap configured
-		lg.gasFeeCap = big.NewInt(lg.cfg.GasFeeCap)
+	if lg.gasless {
+		// Zero-fee chain: both tip and fee cap are zero, so an unfunded random
+		// account can send. Skip the gas-price / baseFee probes and the bumps
+		// below — they would otherwise raise the fee cap to a non-zero value and
+		// require the sender to hold a balance, defeating gasless mode.
+		lg.gasTipCap = big.NewInt(0)
+		lg.gasFeeCap = big.NewInt(0)
+		lg.logger.Info("gasless: zero gas tip and fee cap")
 	} else {
-		// Auto-calculate from chain's gas price (query L2 node)
-		gasPrice, err := lg.l2Client.GetGasPrice(ctx)
-		if err != nil {
-			lg.logger.Warn("failed to query gas price, using 2x tip as fee cap", "error", err)
-			lg.gasFeeCap = new(big.Int).Mul(lg.gasTipCap, big.NewInt(2))
+		lg.gasTipCap = big.NewInt(lg.cfg.GasTipCap)
+		if lg.cfg.GasFeeCap > 0 {
+			// Explicit fee cap configured
+			lg.gasFeeCap = big.NewInt(lg.cfg.GasFeeCap)
 		} else {
-			// Use 2x queried price for headroom against base fee fluctuation
-			lg.gasFeeCap = new(big.Int).Mul(big.NewInt(int64(gasPrice)), big.NewInt(2))
+			// Auto-calculate from chain's gas price (query L2 node)
+			gasPrice, err := lg.l2Client.GetGasPrice(ctx)
+			if err != nil {
+				lg.logger.Warn("failed to query gas price, using 2x tip as fee cap", "error", err)
+				lg.gasFeeCap = new(big.Int).Mul(lg.gasTipCap, big.NewInt(2))
+			} else {
+				// Use 2x queried price for headroom against base fee fluctuation
+				lg.gasFeeCap = new(big.Int).Mul(big.NewInt(int64(gasPrice)), big.NewInt(2))
+			}
 		}
-	}
 
-	// EIP-1559 invariant: maxFeePerGas (feeCap) must be >= maxPriorityFeePerGas
-	// (tipCap), otherwise the node rejects the tx outright. On a quiet chain
-	// eth_gasPrice (and thus 2x it) can fall below the configured tip, which
-	// silently fails every transaction. Clamp the fee cap up to the tip.
-	if lg.gasFeeCap.Cmp(lg.gasTipCap) < 0 {
-		lg.logger.Warn("gasFeeCap below gasTipCap; raising to tipCap (EIP-1559 invariant)",
-			"oldFeeCap", lg.gasFeeCap, "tipCap", lg.gasTipCap)
-		lg.gasFeeCap = new(big.Int).Set(lg.gasTipCap)
-	}
+		// EIP-1559 invariant: maxFeePerGas (feeCap) must be >= maxPriorityFeePerGas
+		// (tipCap), otherwise the node rejects the tx outright. On a quiet chain
+		// eth_gasPrice (and thus 2x it) can fall below the configured tip, which
+		// silently fails every transaction. Clamp the fee cap up to the tip.
+		if lg.gasFeeCap.Cmp(lg.gasTipCap) < 0 {
+			lg.logger.Warn("gasFeeCap below gasTipCap; raising to tipCap (EIP-1559 invariant)",
+				"oldFeeCap", lg.gasFeeCap, "tipCap", lg.gasTipCap)
+			lg.gasFeeCap = new(big.Int).Set(lg.gasTipCap)
+		}
 
-	// CRITICAL: Ensure gasFeeCap is above current baseFee to avoid silent rejections
-	// Query baseFee directly from latest block and ensure we're at least 2x above it
-	if baseFee, err := lg.l2Client.GetBaseFee(ctx); err == nil && baseFee > 0 {
-		minFeeCap := new(big.Int).Mul(big.NewInt(int64(baseFee)), big.NewInt(2))
-		if lg.gasFeeCap.Cmp(minFeeCap) < 0 {
-			lg.logger.Warn("gasFeeCap below 2x baseFee, adjusting to prevent rejections",
-				"oldFeeCap", lg.gasFeeCap,
-				"newFeeCap", minFeeCap,
+		// CRITICAL: Ensure gasFeeCap is above current baseFee to avoid silent rejections
+		// Query baseFee directly from latest block and ensure we're at least 2x above it
+		if baseFee, err := lg.l2Client.GetBaseFee(ctx); err == nil && baseFee > 0 {
+			minFeeCap := new(big.Int).Mul(big.NewInt(int64(baseFee)), big.NewInt(2))
+			if lg.gasFeeCap.Cmp(minFeeCap) < 0 {
+				lg.logger.Warn("gasFeeCap below 2x baseFee, adjusting to prevent rejections",
+					"oldFeeCap", lg.gasFeeCap,
+					"newFeeCap", minFeeCap,
+					"baseFee", baseFee,
+					"baseFeeGwei", float64(baseFee)/1e9,
+				)
+				lg.gasFeeCap = minFeeCap
+			}
+			lg.logger.Info("gas pricing configured",
+				"gasTipCap", lg.gasTipCap,
+				"gasFeeCap", lg.gasFeeCap,
 				"baseFee", baseFee,
 				"baseFeeGwei", float64(baseFee)/1e9,
 			)
-			lg.gasFeeCap = minFeeCap
+		} else {
+			lg.logger.Info("gas pricing configured (baseFee query failed, using calculated values)",
+				"gasTipCap", lg.gasTipCap,
+				"gasFeeCap", lg.gasFeeCap,
+				"baseFeeError", err,
+			)
 		}
-		lg.logger.Info("gas pricing configured",
-			"gasTipCap", lg.gasTipCap,
-			"gasFeeCap", lg.gasFeeCap,
-			"baseFee", baseFee,
-			"baseFeeGwei", float64(baseFee)/1e9,
-		)
-	} else {
-		lg.logger.Info("gas pricing configured (baseFee query failed, using calculated values)",
-			"gasTipCap", lg.gasTipCap,
-			"gasFeeCap", lg.gasFeeCap,
-			"baseFeeError", err,
-		)
 	}
 
 	// Deploy contracts if needed for non-ETH-transfer types
@@ -411,6 +471,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	atomic.StoreInt64(&lg.peakRate, 0)
 	atomic.StoreInt64(&lg.pendingCount, 0)
 	atomic.StoreInt32(&lg.stopping, 0)
+	atomic.StoreInt32(&lg.forceStop, 0)
 
 	// Reset metrics
 	lg.metricsCol.Reset()
@@ -546,11 +607,14 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		cancel()
 	}
 
-	// Spawn the receipt-polling fallback for execution layers that don't
-	// provide a preconfirmation stream. Done here (not earlier) so the poller
-	// can anchor at `testStartBlockNumber` rather than scanning historical
-	// blocks.
-	if !lg.cfg.Capabilities.SupportsPreconfirmations {
+	// Spawn the receipt-polling fallback when no live preconfirmation stream is
+	// available — either the execution layer has no preconf channel, or it does
+	// but no preconf WS URL is configured (e.g. external/prod privacy mode, where
+	// the only RPC endpoint is the proxy and there is no builder preconf socket).
+	// Without this, such modes would have zero confirmation sources and report 0
+	// confirmed even though txs land on-chain. Started here (not earlier) so the
+	// poller anchors at `testStartBlockNumber` rather than scanning from block 0.
+	if !lg.cfg.Capabilities.SupportsPreconfirmations || lg.cfg.PreconfWSURL == "" {
 		go lg.connectChainPoller()
 	}
 

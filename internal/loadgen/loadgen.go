@@ -115,6 +115,10 @@ type LoadGenerator struct {
 	gasTipCap *big.Int // Priority fee (tip)
 	gasFeeCap *big.Int // Max fee per gas
 
+	// Gasless mode (set at test start): zero-fee chain, skip funding, send
+	// 0-value eth-transfers. See StartTestRequest.Gasless.
+	gasless bool
+
 	// Circuit breaker for failure detection
 	recentSends       int64 // atomic - sends in current window
 	recentFails       int64 // atomic - failures in current window
@@ -155,6 +159,10 @@ type LoadGenerator struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	stopping int32 // atomic
+	// forceStop is set (atomic) by the user-facing Stop button to abort the
+	// post-test confirmation sequence (grace period, receipt resolution, on-chain
+	// verification) so the test ends promptly. Natural completion leaves it 0.
+	forceStop int32 // atomic
 
 	// Async transaction sender with backpressure
 	sender        TxSender
@@ -178,6 +186,7 @@ type LoadGenerator struct {
 	peakTxPerSec       float64           // Peak rolling TX/s observed during test
 	lastTxPerSec       float64           // Last calculated TX/s (frozen when test ends)
 	lastBlockTime      time.Time
+	lastBlockInterval  time.Duration // Most recent observed block interval (poller path; sizes the grace period)
 	lastBlockNumber    uint64
 	firstBlockNumber   uint64 // First block seen during test (from WebSocket)
 	lastRecordedBlock  uint64 // Last block added to blockMetrics (for deduplication)
@@ -282,14 +291,24 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	// L2 clients privacy-routed (proxy URL + token + NoBatch) from the start —
 	// every consumer (nonce, funding, sends, verification) then goes through it.
 	routeAllPrivacy := cfg.PrivacyRouteAll && cfg.PrivacyRPCURL != ""
-	if lg.builderClient == nil {
-		if routeAllPrivacy {
-			c, url, err := buildPrivacyClient(cfg, logger)
-			if err != nil {
-				return nil, fmt.Errorf("privacy route-all builder client: %w", err)
-			}
-			lg.builderClient = c
+	// In route-all mode try to build the privacy-routed client now, but tolerate a
+	// missing/unreadable auth token: in the standalone/paste flow the token arrives
+	// later (pasted in the dashboard), and runInitialization rebuilds the privacy
+	// client at the start of each test. So fall back to plain clients here if it
+	// isn't ready yet, rather than failing to start. One client instance is shared
+	// across builder/l2 (matching the route-all rebuild in runInitialization).
+	var routeAllClient rpc.Client
+	if routeAllPrivacy {
+		if c, url, err := buildPrivacyClient(cfg, logger); err == nil {
+			routeAllClient = c
 			logger.Info("privacy route-all: all RPC routed through privacy proxy", "url", url)
+		} else {
+			logger.Warn("privacy route-all client deferred until test start (auth token not available yet)", "error", err)
+		}
+	}
+	if lg.builderClient == nil {
+		if routeAllClient != nil {
+			lg.builderClient = routeAllClient
 		} else {
 			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
 			builderCfg.Logger = logger
@@ -297,12 +316,8 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		}
 	}
 	if lg.l2Client == nil {
-		if routeAllPrivacy {
-			c, _, err := buildPrivacyClient(cfg, logger)
-			if err != nil {
-				return nil, fmt.Errorf("privacy route-all l2 client: %w", err)
-			}
-			lg.l2Client = c
+		if routeAllClient != nil {
+			lg.l2Client = routeAllClient
 		} else {
 			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
 			l2Cfg.Logger = logger
@@ -413,7 +428,20 @@ func (lg *LoadGenerator) StartTest(req types.StartTestRequest) error {
 
 // StopTest gracefully stops the running test, waits for confirmations,
 // then counts and discards any remaining pending transactions.
+// StopTest is the user-facing stop (the dashboard Stop button): a force stop. It
+// aborts the post-test confirmation sequence (grace period, receipt resolution,
+// on-chain verification) so the test ends promptly rather than waiting for late
+// confirmations.
 func (lg *LoadGenerator) StopTest() {
+	atomic.StoreInt32(&lg.forceStop, 1)
+	lg.stopTest()
+}
+
+// stopTest stops the running test and runs the post-test sequence. Natural
+// completion (the duration watcher) calls it with forceStop unset, so the full
+// confirmation/verification runs; the Stop button sets forceStop first, which
+// short-circuits the grace period, receipt resolution, and on-chain verification.
+func (lg *LoadGenerator) stopTest() {
 	lg.statusMu.RLock()
 	if lg.status != types.StatusRunning {
 		lg.statusMu.RUnlock()
@@ -421,8 +449,13 @@ func (lg *LoadGenerator) StopTest() {
 	}
 	lg.statusMu.RUnlock()
 
-	// Signal stop FIRST - this lets workers know to exit
-	atomic.StoreInt32(&lg.stopping, 1)
+	// Run the stop sequence at most once. A concurrent caller (e.g. a user Stop
+	// arriving during natural completion) just leaves forceStop set, which the
+	// in-progress sequence observes to short-circuit the waits below. Setting
+	// stopping=1 also signals workers (via shouldStop) to exit.
+	if !atomic.CompareAndSwapInt32(&lg.stopping, 0, 1) {
+		return
+	}
 
 	// Stop incremental verification and run final snapshot
 	lg.stopIncrementalVerification()
@@ -462,19 +495,45 @@ func (lg *LoadGenerator) StopTest() {
 		cancel()
 	}
 
-	// Grace period: wait for late confirmation events before closing WebSocket
-	// This allows preconf events still in flight to be processed
-	const confirmationGracePeriod = 3 * time.Second
-	pendingBefore := lg.countPendingTxs()
-	if pendingBefore > 0 {
-		lg.logger.Info("waiting for late confirmations",
-			"pendingTxs", pendingBefore,
-			"gracePeriod", confirmationGracePeriod)
-		time.Sleep(confirmationGracePeriod)
-		pendingAfter := lg.countPendingTxs()
-		lg.logger.Info("grace period complete",
-			"confirmedDuringGrace", pendingBefore-pendingAfter,
-			"stillPending", pendingAfter)
+	// Grace period: wait for late confirmations before closing.
+	//
+	// With a preconfirmation WebSocket, confirmations arrive near-instantly, so a
+	// short fixed window suffices. On the chain-poller path (external/gasless, no
+	// preconf), confirmations are observed by polling blocks over HTTP, which lags
+	// the head — the tail of a run needs several block intervals to be seen.
+	// Scale the grace to the observed block cadence so those late-but-successful
+	// txs land in "confirmed", not "discarded". (They never count as "failed".)
+	if atomic.LoadInt32(&lg.forceStop) == 1 {
+		lg.logger.Info("force stop: skipping confirmation grace period",
+			"pendingTxs", lg.countPendingTxs())
+	} else {
+		confirmationGracePeriod := 3 * time.Second
+		if lg.cfg.PreconfWSURL == "" {
+			lg.blockMetricsMu.Lock()
+			interval := lg.lastBlockInterval
+			lg.blockMetricsMu.Unlock()
+			if interval <= 0 {
+				interval = 2 * time.Second // no cadence observed yet; assume a slow-ish chain
+			}
+			confirmationGracePeriod = 6 * interval
+			if confirmationGracePeriod < 6*time.Second {
+				confirmationGracePeriod = 6 * time.Second
+			}
+			if confirmationGracePeriod > 30*time.Second {
+				confirmationGracePeriod = 30 * time.Second
+			}
+		}
+		pendingBefore := lg.countPendingTxs()
+		if pendingBefore > 0 {
+			lg.logger.Info("waiting for late confirmations",
+				"pendingTxs", pendingBefore,
+				"gracePeriod", confirmationGracePeriod)
+			lg.sleepUnlessForced(confirmationGracePeriod)
+			pendingAfter := lg.countPendingTxs()
+			lg.logger.Info("grace period complete",
+				"confirmedDuringGrace", pendingBefore-pendingAfter,
+				"stillPending", pendingAfter)
+		}
 	}
 
 	// Close preconf connection
@@ -501,6 +560,18 @@ func (lg *LoadGenerator) StopTest() {
 	}
 	lg.l2WsConnMu.Unlock()
 
+	// Resolve still-pending txs by their on-chain receipt, independent of the
+	// throughput block-window: a tx that landed just after our cutoff becomes
+	// confirmed, not discarded. Only txs with no receipt remain to be discarded.
+	// Skipped on a force stop — the user wants the test to end now, not wait on
+	// per-tx receipt lookups.
+	if atomic.LoadInt32(&lg.forceStop) == 1 {
+		lg.logger.Info("force stop: skipping pending-tx receipt resolution")
+	} else if lateConfirmed := lg.resolvePendingViaReceipts(); lateConfirmed > 0 {
+		lg.logger.Info("reclassified late-landing txs as confirmed via receipt lookup",
+			"lateConfirmed", lateConfirmed)
+	}
+
 	// Finalize pending transactions: mark remaining as discarded
 	lg.discardedCount = lg.finalizePendingTxs()
 	if lg.discardedCount > 0 {
@@ -522,6 +593,18 @@ func (lg *LoadGenerator) StopTest() {
 	lg.statusMu.Unlock()
 
 	lg.logger.Info("test stopped")
+}
+
+// sleepUnlessForced waits up to d, returning early if a force stop is requested
+// (the Stop button). Lets the confirmation grace period be aborted promptly.
+func (lg *LoadGenerator) sleepUnlessForced(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&lg.forceStop) == 1 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // countPendingTxs counts transactions still in pending state.

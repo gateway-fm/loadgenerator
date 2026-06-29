@@ -100,6 +100,7 @@ func main() {
 		PrivacyOrgIDFile:     os.Getenv("PRIVACY_ORG_ID_FILE"),
 		PrivacyOrgID:         os.Getenv("PRIVACY_ORG_ID"),
 		PrivacyRouteAll:      os.Getenv("PRIVACY_ROUTE_ALL") == "true" || os.Getenv("PRIVACY_ROUTE_ALL") == "1",
+		Gasless:              os.Getenv("GASLESS") == "true" || os.Getenv("GASLESS") == "1",
 	}
 
 	cfg.Capabilities = execnode.DefaultRegistry().Get(cfg.ExecutionLayer)

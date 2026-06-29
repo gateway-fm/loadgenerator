@@ -3,6 +3,7 @@ package loadgen
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,112 @@ func (lg *LoadGenerator) recordTxConfirmed(txHash common.Hash, confirmedAt time.
 		// NOTE: Don't delete from pendingTxs here - we need confirmed entries for
 		// TX receipt verification at test end. The map is cleared in initBuffers.
 	}
+}
+
+// resolvePendingViaReceipts resolves each still-pending transaction by its
+// on-chain receipt, independent of the throughput block-window. A tx with a
+// successful receipt landed on-chain (typically a block or two after the window
+// closed) and is reclassified as confirmed; one with no receipt stays pending
+// and is later discarded. This separates per-tx success (receipt lookup) from
+// throughput measurement (the [start,end] block range), so late-but-included
+// txs are not mislabeled as discarded. Returns the number reclassified.
+//
+// Safe to count: a still-"pending" map entry was never touched by the poller (the
+// poller marks anything it sees "confirmed"), so its sent-time is still tracked
+// and RecordTxConfirmed increments the confirmed counter.
+func (lg *LoadGenerator) resolvePendingViaReceipts() uint64 {
+	if !lg.txLoggingEnabled || lg.l2Client == nil {
+		return 0
+	}
+
+	var pending []common.Hash
+	lg.pendingTxs.Range(func(key, value any) bool {
+		if e, ok := value.(*storage.TxLogEntry); ok && e.Status == "pending" {
+			if h, ok2 := key.(common.Hash); ok2 {
+				pending = append(pending, h)
+			}
+		}
+		return true
+	})
+	if len(pending) == 0 {
+		return 0
+	}
+
+	lg.logger.Info("resolving pending txs via on-chain receipts", "count", len(pending))
+	lg.statusMu.Lock()
+	lg.verifyProgress = fmt.Sprintf("Resolving %d pending transactions via receipts...", len(pending))
+	lg.statusMu.Unlock()
+
+	// Abortable: a force stop (the Stop button) cancels resolveCtx so in-flight
+	// receipt lookups return immediately, and the loop below skips the rest — so
+	// hitting Stop mid-resolution ends it promptly instead of running to completion.
+	resolveCtx, cancelAll := context.WithCancel(context.Background())
+	defer cancelAll()
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-resolveCtx.Done():
+				return
+			case <-ticker.C:
+				if atomic.LoadInt32(&lg.forceStop) == 1 {
+					cancelAll()
+					return
+				}
+			}
+		}
+	}()
+
+	const workers = 16
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var resolved, notFound, errored, reverted, aborted uint64
+	now := time.Now()
+
+	for _, h := range pending {
+		if atomic.LoadInt32(&lg.forceStop) == 1 {
+			aborted++ // force stop: skip remaining lookups (loop is single-threaded)
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(hash common.Hash) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// Child of resolveCtx so a force stop cancels in-flight lookups.
+			ctx, cancel := context.WithTimeout(resolveCtx, 5*time.Second)
+			defer cancel()
+			receipt, err := lg.l2Client.GetTransactionReceipt(ctx, hash.Hex())
+			switch {
+			case err != nil:
+				atomic.AddUint64(&errored, 1)
+				return // lookup failed/aborted -> stays pending -> discarded
+			case receipt == nil:
+				atomic.AddUint64(&notFound, 1)
+				return // not on-chain -> genuinely pending/dropped -> discarded
+			case receipt.Status != 1:
+				atomic.AddUint64(&reverted, 1)
+				return // landed but reverted -> not a success
+			}
+			// On-chain and successful: count it as a (late) confirmation, mirroring
+			// the chain poller's confirmation path.
+			lg.metricsCol.RecordTxConfirmed(hash, now)
+			lg.recordTxConfirmed(hash, now)
+			metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+			atomic.AddUint64(&resolved, 1)
+		}(h)
+	}
+	wg.Wait()
+	lg.logger.Info("pending-tx receipt resolution complete",
+		"checked", len(pending),
+		"confirmedLate", resolved,
+		"notOnChain", notFound,
+		"reverted", reverted,
+		"lookupErrors", errored,
+		"abortedByStop", aborted)
+	return resolved
 }
 
 // recordTxPreconfirmed updates a transaction with preconfirmation time (non-blocking).
@@ -170,8 +277,15 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 		avgFillRate = fillRateSum / float64(fillRateCount)
 	}
 
-	// Get on-chain verification metrics by querying blocks
-	onChainMetrics := lg.calculateOnChainMetrics(ctx)
+	// Get on-chain verification metrics by querying blocks. Skipped on a force
+	// stop — the user aborted the run, so we don't scan the chain; the live
+	// counts are persisted as-is.
+	var onChainMetrics onChainMetricsResult
+	if atomic.LoadInt32(&lg.forceStop) == 1 {
+		lg.logger.Info("force stop: skipping on-chain verification")
+	} else {
+		onChainMetrics = lg.calculateOnChainMetrics(ctx)
+	}
 
 	// Fallback: If time series block metrics are all 0 (WebSocket failed), use on-chain metrics
 	if totalBlocks == 0 && totalGasUsed == 0 && onChainMetrics.firstBlock > 0 && onChainMetrics.lastBlock >= onChainMetrics.firstBlock {
@@ -202,7 +316,7 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 	// including those that were "pending" from our tracking perspective (confirmation notification
 	// not yet received when test stopped). If we sent N TXs and on-chain shows N, that's a match.
 	var verificationResult *storage.VerificationResult
-	if lg.l2Client != nil {
+	if lg.l2Client != nil && atomic.LoadInt32(&lg.forceStop) == 0 {
 		// Check if we have incremental verification snapshots
 		incrementalSnapshots := lg.getIncrementalSnapshots()
 

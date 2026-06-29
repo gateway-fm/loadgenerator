@@ -2,7 +2,9 @@ package loadgen
 
 import (
 	"context"
+	"errors"
 	"math/big"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -124,6 +126,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				GasFeeCap: gasFeeCap,
 				From:      acc.Address,
 				UseLegacy: lg.cfg.Capabilities != nil && lg.cfg.Capabilities.RequiresLegacyTx,
+				Gasless:   lg.gasless,
 			})
 			if err != nil {
 				lg.logger.Error("failed to build tx", "error", err)
@@ -199,15 +202,33 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			nonceVal := n
 
 			callback := func(sendErr error) {
-				if sendErr != nil {
-					nonceVal.Rollback()
-					lg.metricsCol.RecordTxFailed("send")
-					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
-					atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
-					lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
-				} else {
+				if sendErr == nil {
 					nonceVal.Commit()
+					return
 				}
+				// "already known" / ALREADY_EXISTS: an earlier (usually auto-retried)
+				// submission of this exact signed tx already reached the mempool/chain.
+				// It was counted as sent and is out there awaiting inclusion — treat it
+				// as a successful submit: commit the nonce and leave it pending for the
+				// confirmation/receipt path to pick up. Not a failure.
+				if isAlreadyKnownTx(sendErr) {
+					nonceVal.Commit()
+					lg.logger.Debug("async send: tx already submitted (already known), treating as sent", "txHash", txHash.Hex())
+					return
+				}
+				nonceVal.Rollback()
+				metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+				// A context cancellation means the test ended while this send was in
+				// flight — the request was aborted at the boundary, not rejected by the
+				// chain/proxy. Don't count it as a failure or trip the circuit breaker;
+				// it falls into "discarded" instead.
+				if errors.Is(sendErr, context.Canceled) {
+					lg.logger.Debug("async send canceled at shutdown", "txHash", txHash.Hex())
+					return
+				}
+				lg.metricsCol.RecordTxFailed("send")
+				atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
+				lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
 			}
 			batchCallbacks = append(batchCallbacks, callback)
 
@@ -533,9 +554,22 @@ func (lg *LoadGenerator) completionWatcher() {
 		case <-ticker.C:
 			elapsed := time.Since(lg.startTime)
 			if elapsed >= lg.currentDuration {
-				lg.StopTest()
+				lg.stopTest() // natural completion: run full confirmation/verification
 				return
 			}
 		}
 	}
+}
+
+// isAlreadyKnownTx reports whether a send error means the identical signed tx was
+// already submitted (in the mempool or already on-chain) — geth's "already known"
+// / JSON-RPC "-32000 ALREADY_EXISTS". This happens when an internal RPC retry
+// resends a tx whose first attempt already reached the node (common over a remote
+// proxy). The transaction itself succeeded, so the resend is not a failure.
+func isAlreadyKnownTx(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "already known") || strings.Contains(s, "already_exists")
 }

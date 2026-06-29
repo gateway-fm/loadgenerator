@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
+	"github.com/gateway-fm/loadgenerator/internal/rpc"
 )
 
 // connectChainPoller is the receipt-polling confirmation fallback used when
@@ -102,7 +103,14 @@ func (lg *LoadGenerator) scanBlockForConfirmations(blockNum uint64) error {
 	if err != nil {
 		return err
 	}
-	if block == nil || len(block.Transactions) == 0 {
+	if block == nil {
+		return nil
+	}
+	// Feed the live charts (MGas/s, TPS, fill rate) from the block we already
+	// fetched for confirmation scanning — no extra RPC. This makes the WS-less
+	// external/gasless mode populate the same metrics as the bundled WS path.
+	lg.recordPolledBlockMetrics(block)
+	if len(block.Transactions) == 0 {
 		return nil
 	}
 
@@ -148,4 +156,68 @@ func (lg *LoadGenerator) scanBlockForConfirmations(blockNum uint64) error {
 		)
 	}
 	return nil
+}
+
+// recordPolledBlockMetrics feeds the live charts (MGas/s, TPS, fill rate, totals)
+// from a block the chain poller already fetched for confirmation scanning, so it
+// adds no RPC calls. It mirrors what the block-metrics WebSocket handler does
+// (cumulative gas, per-period buffer, rolling windows), which is why it makes the
+// WS-less external/gasless mode chart match the bundled one — and why it leaves
+// the getBlockMetricsViaRPC fallback dormant (blockMetrics is non-empty), so
+// blocks are never counted twice.
+//
+// Block time comes from the blocks' own timestamps, not wall-clock: the poller
+// may scan several blocks in one pass while catching up, and wall-clock deltas
+// would then collapse to near-zero and spike MGas/s. The rolling-window getters
+// prune/divide by point timestamps, so chain-time stamping is consistent there.
+func (lg *LoadGenerator) recordPolledBlockMetrics(block *rpc.Block) {
+	lg.blockMetricsMu.Lock()
+	defer lg.blockMetricsMu.Unlock()
+
+	// Count each block once; never go backwards.
+	if block.Number <= lg.lastRecordedBlock {
+		return
+	}
+
+	lg.cumulativeGasUsed += block.GasUsed
+	lg.cumulativeGasLimit += block.GasLimit
+	lg.totalBlockCount++
+	if lg.firstBlockNumber == 0 {
+		lg.firstBlockNumber = block.Number
+	}
+	lg.lastBlockNumber = block.Number
+	if lg.rpcLastBlockNumber < block.Number {
+		// Keep the RPC fallback's cursor in sync so it never re-fetches these.
+		lg.rpcLastBlockNumber = block.Number
+	}
+
+	ts := block.Timestamp
+	// Append a time-series point once a previous block exists to measure the
+	// interval against (mirrors the WS handler skipping the very first block).
+	if !lg.lastBlockTime.IsZero() {
+		blockTime := ts.Sub(lg.lastBlockTime)
+		if blockTime <= 0 {
+			// Whole-second block timestamps can tie; fall back to the configured
+			// block time so the MGas/s divisor is never zero.
+			blockTime = time.Duration(lg.cfg.BlockTimeMS) * time.Millisecond
+			if blockTime <= 0 {
+				blockTime = time.Second
+			}
+		}
+		txCount := len(block.Transactions)
+		lg.blockMetrics = append(lg.blockMetrics, blockMetricsPoint{
+			timestamp:   ts,
+			blockNumber: block.Number,
+			gasUsed:     block.GasUsed,
+			gasLimit:    block.GasLimit,
+			txCount:     txCount,
+			blockTime:   blockTime.Seconds(),
+			blockTimeMs: blockTime.Milliseconds(),
+		})
+		lg.rollingGasWindow = append(lg.rollingGasWindow, rollingGasPoint{timestamp: ts, gasUsed: block.GasUsed})
+		lg.rollingTxWindow = append(lg.rollingTxWindow, rollingTxPoint{timestamp: ts, txCount: txCount})
+		lg.lastBlockInterval = blockTime // observed cadence; sizes the end-of-test grace period
+	}
+	lg.lastRecordedBlock = block.Number
+	lg.lastBlockTime = ts
 }
