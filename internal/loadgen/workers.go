@@ -229,6 +229,29 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				lg.metricsCol.RecordTxFailed("send")
 				atomic.AddInt64(&lg.recentFails, 1) // Circuit breaker tracking
 				lg.logger.Debug("async send failed", "error", sendErr, "txHash", txHash.Hex())
+
+				// Nonce drift is recoverable, but only if we act on it. On a
+				// chain with no mempool (Arbitrum Nitro) a rejected nonce means
+				// every LATER transaction from this account is unsendable too,
+				// so without this the account is dead for the rest of the run
+				// and throughput decays to zero one account at a time.
+				// Resyncing from confirmed chain state puts it back to work.
+				//
+				// Fired async: this callback runs on the sender hot path and an
+				// inline RPC round trip would stall sending. Rate-limited inside
+				// MaybeResyncFromChain so a flood of rejections for one account
+				// collapses into a single getTransactionCount.
+				if isNonceError(sendErr) {
+					go func() {
+						did, rErr := acc.MaybeResyncFromChain(lg.ctx, lg.l2Client, nonceResyncInterval)
+						if rErr != nil {
+							lg.logger.Debug("nonce resync failed", "addr", acc.Address.Hex(), "error", rErr)
+						} else if did {
+							lg.logger.Debug("nonce resynced after rejection",
+								"addr", acc.Address.Hex(), "nonce", acc.PeekNonce())
+						}
+					}()
+				}
 			}
 			batchCallbacks = append(batchCallbacks, callback)
 
@@ -572,4 +595,46 @@ func isAlreadyKnownTx(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "already known") || strings.Contains(s, "already_exists")
+}
+
+// nonceResyncInterval is the minimum gap between in-test nonce resyncs for a
+// single account. Short enough that a stalled account rejoins the run within a
+// couple of blocks, long enough that thousands of rejections per second across
+// hundreds of accounts cannot turn into an eth_getTransactionCount flood that
+// moves the bottleneck onto the RPC node.
+const nonceResyncInterval = 750 * time.Millisecond
+
+// maxSenderWorkers caps the sender goroutine pool. Each worker is PINNED to one
+// account for the whole run (accounts[id%len(accounts)]), so this is also the
+// effective size of the sender pool: raising numAccounts above it funds and sets
+// up accounts that never send a single transaction.
+//
+// Raised from 500 for PRST-4262. The pool size sets each account's nonce
+// VELOCITY, and on a chain with no mempool that is what decides whether a run is
+// stable: 1500 tx/s across 500 accounts is 3 tx/s per account, each worker firing
+// batches of 20 consecutive nonces, so any reordering or loss strands the rest of
+// that batch and the account needs a resync to recover. Spreading the same rate
+// over 2000 accounts cuts per-account velocity 4x and makes drift far less likely.
+//
+// Kept at sender concurrency / 4 as before (concurrency is 8000), so the
+// semaphore still absorbs a full round of concurrent batch sends.
+const maxSenderWorkers = 2000
+
+// isNonceError reports whether a send was refused because the sender's nonce did
+// not match chain state — either ahead of it ("nonce too high", no predecessor to
+// follow) or behind it ("nonce too low", already consumed).
+//
+// Both are recoverable by resyncing from the chain, and both are FATAL to an
+// account if left alone on a chain with no mempool: Nitro will not hold a
+// transaction whose predecessor is missing, so every later nonce from that
+// account is refused too. See Account.MaybeResyncFromChain.
+func isNonceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "nonce too low") ||
+		strings.Contains(s, "nonce too high") ||
+		strings.Contains(s, "invalid nonce") ||
+		strings.Contains(s, "nonce has already been used")
 }

@@ -96,6 +96,24 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		lg.logger.Info("waiting for Uniswap transactions to settle...")
 		time.Sleep(5 * time.Second)
 
+		// Re-sync every account's nonce from the chain after Uniswap setup.
+		//
+		// SetupAccounts sends 4 TXs per account (mint USDC, wrap ETH, approve
+		// WETH, approve USDC) via setupAccountFireAndForget, which reads the
+		// nonce straight from the RPC into a LOCAL variable and increments that.
+		// It never advances the Account's own counter — the one ReserveNonce
+		// hands out during the load phase. So without this resync the load phase
+		// starts from the pre-setup nonce and the chain rejects EVERY
+		// transaction with "nonce too low: tx: 0 state: 4", giving txFailed ==
+		// txSent and a near-idle chain that looks like a throughput ceiling.
+		//
+		// Safe to do here: SetupAccounts already blocked on receipts for the
+		// last TX of every account, and nonce ordering means the earlier three
+		// are confirmed too, so the confirmed on-chain nonce is the true value.
+		if err := lg.accountMgr.InitializeNoncesFromChain(ctx, lg.l2Client, totalAccounts); err != nil {
+			return fmt.Errorf("failed to resync nonces after Uniswap setup: %w", err)
+		}
+
 		// Cache Uniswap contract addresses
 		lg.saveUniswapContractsToCache(ctx, cacheChainID, uniswapBuilder)
 
@@ -318,6 +336,14 @@ func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chai
 	if err := uniswapBuilder.SetupAccounts(ctx, needSetup, lg.builderClient, bigChainID, gasPrice); err != nil {
 		lg.logger.Warn("failed to setup accounts for Uniswap", "error", err)
 		return
+	}
+
+	// Same stale-nonce hazard as the fresh-deploy path above: the 4 setup TXs per
+	// account bypass the Account nonce counter, so resync from chain before the
+	// load phase reserves any nonce. See the long comment at the other call site.
+	if err := lg.accountMgr.InitializeNoncesFromChain(ctx, lg.l2Client,
+		len(lg.accountMgr.GetAccounts())+len(dynamicAccounts)); err != nil {
+		lg.logger.Warn("failed to resync nonces after incremental Uniswap setup", "error", err)
 	}
 
 	// Mark newly-setup accounts as uniswap-ready in cache

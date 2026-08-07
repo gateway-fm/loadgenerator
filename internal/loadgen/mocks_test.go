@@ -290,6 +290,7 @@ type mockAccountManager struct {
 	ValidateBalancesFn         func(ctx context.Context, client rpc.Client, accounts []*account.Account, minBalance *big.Int) (funded, unfunded []*account.Account)
 	InitializeNoncesFn         func(ctx context.Context, client rpc.Client, numAccounts int) error
 	InitializeDynamicNoncesFn  func(ctx context.Context, client rpc.Client) error
+	InitializeNoncesFromChainFn func(ctx context.Context, client rpc.Client, numAccounts int) error
 	RecycleFundsFn             func(ctx context.Context, client rpc.Client) (int, error)
 	ExportDynamicAccountKeysFn func() []account.AccountKeyPair
 }
@@ -332,6 +333,12 @@ func (m *mockAccountManager) InitializeNonces(ctx context.Context, client rpc.Cl
 func (m *mockAccountManager) InitializeDynamicNonces(ctx context.Context, client rpc.Client) error {
 	if m.InitializeDynamicNoncesFn != nil {
 		return m.InitializeDynamicNoncesFn(ctx, client)
+	}
+	return nil
+}
+func (m *mockAccountManager) InitializeNoncesFromChain(ctx context.Context, client rpc.Client, numAccounts int) error {
+	if m.InitializeNoncesFromChainFn != nil {
+		return m.InitializeNoncesFromChainFn(ctx, client, numAccounts)
 	}
 	return nil
 }

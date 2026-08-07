@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -21,6 +22,10 @@ type Account struct {
 	nonce      uint64
 	freeNonces []uint64 // rolled-back nonces available for reuse (sorted ascending)
 	mu         sync.Mutex
+	// Unix nanos of the last in-test nonce resync, for rate-limiting
+	// MaybeResyncFromChain. Separate from mu so the common "too soon, skip"
+	// path costs one atomic load and never contends with nonce reservation.
+	lastResyncNano atomic.Int64
 }
 
 // NewAccount creates an account from a private key.
@@ -201,6 +206,46 @@ func (a *Account) ForceResyncFromChain(ctx context.Context, client rpc.Client) e
 	a.freeNonces = a.freeNonces[:0]
 	a.mu.Unlock()
 	return nil
+}
+
+// MaybeResyncFromChain force-resyncs this account's nonce from confirmed chain
+// state, but at most once per minInterval. Returns true if a resync ran.
+//
+// This is the in-test recovery path for nonce drift, and on a chain with no
+// mempool it is what keeps a run alive (PRST-4262).
+//
+// Rollback() already recycles the nonce of a rejected send, but nothing bounds
+// how far the reserved counter runs ahead of chain state: the generator reserves
+// at the target rate while inclusion proceeds at whatever rate the chain manages,
+// so any sustained shortfall becomes an ever-growing gap. On Arbitrum Nitro there
+// is no mempool to hold the out-of-order remainder — a transaction whose
+// predecessor is missing is rejected outright — so once an account's counter is
+// more than a little ahead, EVERY subsequent transaction from it is refused with
+// "nonce too high" and that account is dead for the rest of the run. Observed
+// live: all 500 sender accounts dead within ~70s at a 1000 tx/s target, gaps of
+// ~79 nonces (tx: 148 vs state: 69), confirmations frozen while the chain sat
+// idle with 100% of blocks closing "tx exhausted".
+//
+// Resyncing on the rejection turns a permanently dead account back into a
+// working one. Rate-limited because at high load thousands of rejections can
+// arrive per second per account, and one eth_getTransactionCount each would
+// simply move the overload to the RPC node.
+//
+// ForceResync (not the set-if-higher Resync) is required: the whole point is to
+// bring an inflated local counter back DOWN to chain state, which the
+// set-if-higher guard would refuse to do.
+func (a *Account) MaybeResyncFromChain(ctx context.Context, client rpc.Client, minInterval time.Duration) (bool, error) {
+	now := time.Now().UnixNano()
+	last := a.lastResyncNano.Load()
+	if now-last < int64(minInterval) {
+		return false, nil
+	}
+	// CAS so that concurrent rejections for the same account collapse into a
+	// single resync rather than a stampede.
+	if !a.lastResyncNano.CompareAndSwap(last, now) {
+		return false, nil
+	}
+	return true, a.ForceResyncFromChain(ctx, client)
 }
 
 // SetNonce sets the nonce value directly and clears the free list.

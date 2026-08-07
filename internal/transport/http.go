@@ -18,7 +18,7 @@ import (
 
 // Input validation constants
 const (
-	maxDurationSec  = 3600    // Maximum test duration: 1 hour
+	maxDurationSec  = 86400   // Maximum test duration: 24 hours (soak runs need >1h)
 	maxTPS          = 100000  // Maximum TPS
 	maxAccounts     = 100000  // Maximum number of accounts
 	maxRampSteps    = 1000    // Maximum ramp steps

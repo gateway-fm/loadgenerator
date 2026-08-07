@@ -349,7 +349,11 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	if lg.sender == nil {
 		lg.sender = sender.New(sender.Config{
 			Client:      lg.builderClient,
-			Concurrency: 2000, // Max concurrent in-flight sends
+			// 8000, raised from 2000 for PRST-4262: the sender pool is now up
+			// to maxSenderWorkers (2000) goroutines and each consumes one
+			// semaphore slot per BATCH, so 2000 would let a single round of
+			// concurrent batches saturate the semaphore and serialise sending.
+			Concurrency: 8000, // Max concurrent in-flight sends
 			Logger:      logger,
 		})
 	}

@@ -35,6 +35,10 @@ type AccountManager interface {
 	ValidateBalances(ctx context.Context, client rpc.Client, accounts []*account.Account, minBalance *big.Int) (funded, unfunded []*account.Account)
 	InitializeNonces(ctx context.Context, client rpc.Client, numAccounts int) error
 	InitializeDynamicNonces(ctx context.Context, client rpc.Client) error
+	// InitializeNoncesFromChain resyncs built-in AND dynamic accounts from
+	// confirmed on-chain state. Needed after Uniswap account setup, which sends
+	// TXs without advancing the Account nonce counters.
+	InitializeNoncesFromChain(ctx context.Context, client rpc.Client, numAccounts int) error
 	RecycleFunds(ctx context.Context, client rpc.Client) (int, error)
 	ExportDynamicAccountKeys() []account.AccountKeyPair
 }

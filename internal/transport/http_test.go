@@ -52,7 +52,7 @@ func TestValidateStartRequest_Constant(t *testing.T) {
 			name: "duration exceeds max",
 			req: types.StartTestRequest{
 				Pattern:      types.PatternConstant,
-				DurationSec:  7200, // 2 hours, max is 1 hour
+				DurationSec:  90000, // 25 hours, max is 24 hours
 				ConstantRate: 100,
 			},
 			wantErr: "durationSec exceeds maximum",
