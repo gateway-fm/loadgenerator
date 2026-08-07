@@ -217,6 +217,31 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 					lg.logger.Debug("async send: tx already submitted (already known), treating as sent", "txHash", txHash.Hex())
 					return
 				}
+				// "nonce too low" means this nonce is ALREADY CONSUMED on chain -- either
+				// by this very transaction (a retried submit whose first attempt landed,
+				// which Nitro reports as "nonce too low" rather than geth's "already
+				// known") or by a predecessor. Rolling it back returns a SPENT nonce to
+				// the free list, ReserveNonce hands it straight back out, and the resend
+				// fails identically -- a self-sustaining loop that burns the account's
+				// send capacity on a nonce that can never succeed. Measured: 12,844 such
+				// rejections in 60s, all with a gap of exactly one (tx: 1130 state: 1131),
+				// driving the failure rate from 0 to 8.9% in six minutes.
+				//
+				// Commit instead: the nonce is spent, so the account must move past it.
+				// Still counted as a failed SEND below, because from the generator's
+				// point of view this submission did not place a new transaction.
+				if isNonceTooLow(sendErr) {
+					nonceVal.Commit()
+					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+					lg.metricsCol.RecordTxFailed("send")
+					atomic.AddInt64(&lg.recentFails, 1)
+					go func() {
+						if _, rErr := acc.MaybeResyncFromChain(lg.ctx, lg.l2Client, nonceResyncInterval); rErr != nil {
+							lg.logger.Debug("nonce resync failed", "addr", acc.Address.Hex(), "error", rErr)
+						}
+					}()
+					return
+				}
 				nonceVal.Rollback()
 				metrics.AtomicSubSaturating(&lg.pendingCount, 1)
 				// A context cancellation means the test ended while this send was in
@@ -686,6 +711,19 @@ const batchAckTimeout = 30 * time.Second
 // account if left alone on a chain with no mempool: Nitro will not hold a
 // transaction whose predecessor is missing, so every later nonce from that
 // account is refused too. See Account.MaybeResyncFromChain.
+// isNonceTooLow reports whether the sender's nonce was already consumed on chain.
+// Distinguished from the generic nonce error because the two need OPPOSITE
+// handling: a too-HIGH nonce was not consumed and must be rolled back for reuse,
+// while a too-LOW one is spent and must be committed so the account moves past it.
+func isNonceTooLow(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "nonce too low") ||
+		strings.Contains(s, "nonce has already been used")
+}
+
 func isNonceError(err error) bool {
 	if err == nil {
 		return false
