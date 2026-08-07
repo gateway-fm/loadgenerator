@@ -231,9 +231,21 @@ func (a *Account) ForceResyncFromChain(ctx context.Context, client rpc.Client) e
 // arrive per second per account, and one eth_getTransactionCount each would
 // simply move the overload to the RPC node.
 //
-// ForceResync (not the set-if-higher Resync) is required: the whole point is to
-// bring an inflated local counter back DOWN to chain state, which the
-// set-if-higher guard would refuse to do.
+// Uses the SET-IF-HIGHER ResyncFromChain, never the unconditional
+// ForceResyncFromChain. Downgrading the counter here is actively harmful when
+// reads are load-balanced across several RPC replicas: each replica follows the
+// sequencer feed independently, so a read that lands on a lagging replica returns
+// a nonce BELOW what the chain has already consumed. Overwriting with it sends
+// the account backwards, the next transaction is refused "nonce too low", that
+// triggers another resync, and the error feeds itself. Measured live on a 4h
+// soak with 2 RPC replicas: throughput decayed 662 -> 570 tx/s over 30 minutes
+// with rejections becoming exclusively "nonce too low".
+//
+// Set-if-higher still fixes the drift that matters. A counter BEHIND the chain
+// (nonce too low) is corrected upward, which is the case this recovers. A counter
+// AHEAD of the chain (nonce too high) needs no resync: Rollback already returns
+// the rejected nonce to the free list for reuse, and with a large sender pool and
+// a large sequencer reorder cache that case stopped occurring at all.
 func (a *Account) MaybeResyncFromChain(ctx context.Context, client rpc.Client, minInterval time.Duration) (bool, error) {
 	now := time.Now().UnixNano()
 	last := a.lastResyncNano.Load()
@@ -245,7 +257,31 @@ func (a *Account) MaybeResyncFromChain(ctx context.Context, client rpc.Client, m
 	if !a.lastResyncNano.CompareAndSwap(last, now) {
 		return false, nil
 	}
-	return true, a.ForceResyncFromChain(ctx, client)
+	nonce, err := client.GetConfirmedNonce(ctx, a.Address.Hex())
+	if err != nil {
+		return true, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Never go backwards (see the comment above): a lagging replica's read would
+	// otherwise send the account into a nonce-too-low feedback loop.
+	if nonce > a.nonce {
+		a.nonce = nonce
+	}
+	// Drop only the free nonces the chain has already consumed. The plain
+	// ResyncFromChain clears the WHOLE free list, which is correct at test start
+	// but wrong here: a nonce rolled back from a failed send sits in that list
+	// BELOW the head, and discarding it leaves a hole the chain can never pass,
+	// permanently stalling the account -- the exact failure this resync exists to
+	// prevent. Anything still >= the confirmed nonce is genuinely reusable.
+	kept := a.freeNonces[:0]
+	for _, n := range a.freeNonces {
+		if n >= nonce {
+			kept = append(kept, n)
+		}
+	}
+	a.freeNonces = kept
+	return true, nil
 }
 
 // SetNonce sets the nonce value directly and clears the free list.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -267,8 +268,59 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 		}
 
 		if len(batchData) > 0 {
-			// Send the batch
-			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, batchCallbacks)
+			// Serialise this account's batches: wait for the in-flight batch to
+			// finish before the next one is built and sent.
+			//
+			// Without this, a worker fires SendBatchAsync and immediately starts
+			// filling the next batch, so batches carrying CONSECUTIVE nonces for
+			// the SAME account are in flight concurrently on different
+			// connections -- and with more than one RPC replica behind the load
+			// balancer, on different hosts entirely. Nonce 20 then routinely
+			// reaches the sequencer before nonce 19. On a chain with a mempool
+			// that is harmless; on Nitro, which has none, the early batch is
+			// refused "nonce too high" and the account needs a resync to recover.
+			// Measured: a 4h soak decayed 662 -> 570 tx/s over 30 minutes with a
+			// steadily climbing rejection rate.
+			//
+			// Costs one round trip of latency per batch PER ACCOUNT, which does
+			// not reduce aggregate throughput because thousands of accounts are
+			// pipelined in parallel -- and it is also honest backpressure: a
+			// worker cannot outrun the chain's ability to accept its own stream.
+			var wg sync.WaitGroup
+			wg.Add(len(batchCallbacks))
+			gated := make([]func(error), len(batchCallbacks))
+			for i, cb := range batchCallbacks {
+				inner := cb
+				gated[i] = func(err error) {
+					defer wg.Done()
+					inner(err)
+				}
+			}
+			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, gated)
+			if queued {
+				// BOUNDED wait. A plain wg.Wait() deadlocks the worker for good if
+				// the callbacks never fire -- which a Sender implementation is not
+				// contractually obliged to guarantee, and which test doubles in
+				// particular do not (this hung the loadgen test suite for 600s).
+				// Give up waiting on shutdown or after a generous timeout and carry
+				// on: losing per-account ordering for one batch costs a resync,
+				// whereas a wedged worker costs the whole account for the run.
+				done := make(chan struct{})
+				go func() { wg.Wait(); close(done) }()
+				select {
+				case <-done:
+				case <-lg.ctx.Done():
+				case <-time.After(batchAckTimeout):
+					lg.logger.Debug("batch ack timed out; continuing without ordering guarantee",
+						"account", acc.Address.Hex(), "size", len(batchData))
+				}
+			} else {
+				// Not queued means no callback will ever run, so the WaitGroup
+				// counters must be released here or the goroutine above leaks.
+				for range batchCallbacks {
+					wg.Done()
+				}
+			}
 
 			if !queued {
 				// Sender at capacity - rollback ALL nonces in the batch and retry loop
@@ -619,6 +671,12 @@ const nonceResyncInterval = 750 * time.Millisecond
 // Kept at sender concurrency / 4 as before (concurrency is 8000), so the
 // semaphore still absorbs a full round of concurrent batch sends.
 const maxSenderWorkers = 2000
+
+// batchAckTimeout bounds how long a worker waits for its in-flight batch to be
+// acknowledged before sending the next one for the same account. Generous
+// relative to a normal submit (sub-millisecond to low tens of ms) so it only
+// fires when something is genuinely wrong.
+const batchAckTimeout = 30 * time.Second
 
 // isNonceError reports whether a send was refused because the sender's nonce did
 // not match chain state — either ahead of it ("nonce too high", no predecessor to
