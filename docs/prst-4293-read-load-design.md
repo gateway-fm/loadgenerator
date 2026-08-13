@@ -254,6 +254,13 @@ Deliberately excluded from the default mix: `eth_getTransactionCount` (the gener
 own nonce resync reads it; adding synthetic load there muddies a diagnostic we rely
 on) and `eth_estimateGas`. Both available, both off.
 
+**Pair read load with a transaction type that deploys the ERC-20.** The default mix is
+60% `eth_call` against that contract, so read load on a run that deploys nothing —
+`constant` + `eth-transfer`, the most natural first thing to try — refuses to start with
+*no ERC-20 contract address*. That refusal is deliberate (§5), but it is easy to hit:
+either use a `realistic` mix containing `erc20Transfer`, or set `ethCall: 0` and
+redistribute its share.
+
 **Per-method latency reporting is mandatory, not a nicety.** `eth_getLogs` over 16
 blocks at 1500 tx/s spans ~24,000 transactions and is orders of magnitude dearer than
 `eth_call`. Folded into one histogram at a 10% share it dominates p99 and the headline

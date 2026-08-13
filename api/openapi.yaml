@@ -604,7 +604,7 @@ components:
           description: >
             "archive" selection: sample the deepest N% of history. Lowering it walks the
             sampling window toward the head, which is how a node's real pruning horizon
-            is located.
+            is located. 0 means "use the default" (100), not "zero depth".
         requireArchive:
           type: boolean
           description: >

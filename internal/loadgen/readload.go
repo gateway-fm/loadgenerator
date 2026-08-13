@@ -2,6 +2,7 @@ package loadgen
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -33,7 +34,7 @@ const (
 // Returns nil and leaves lg.readEngine nil when read load is not requested — the
 // write-only path then allocates nothing and behaves exactly as before.
 func (lg *LoadGenerator) setupReadLoad(req types.StartTestRequest) error {
-	lg.readEngine = nil
+	lg.readEngine.Store(nil)
 
 	if req.ReadLoad == nil || !req.ReadLoad.Enabled {
 		return nil
@@ -57,10 +58,16 @@ func (lg *LoadGenerator) setupReadLoad(req types.StartTestRequest) error {
 	erc20 := lg.erc20Contract
 	lg.contractsMu.RUnlock()
 
-	accounts := lg.accountMgr.GetAccounts()
-	accounts = append(accounts, lg.accountMgr.GetDynamicAccounts()...)
-	addrs := make([]common.Address, 0, len(accounts))
-	for _, acc := range accounts {
+	// Build a fresh slice rather than appending onto what GetAccounts returns: that
+	// slice is the manager's own, and appending into its spare capacity would write
+	// through to the manager's backing array. contracts.go joins the two the same way.
+	builtIn := lg.accountMgr.GetAccounts()
+	dynamic := lg.accountMgr.GetDynamicAccounts()
+	addrs := make([]common.Address, 0, len(builtIn)+len(dynamic))
+	for _, acc := range builtIn {
+		addrs = append(addrs, acc.Address)
+	}
+	for _, acc := range dynamic {
 		addrs = append(addrs, acc.Address)
 	}
 
@@ -82,7 +89,7 @@ func (lg *LoadGenerator) setupReadLoad(req types.StartTestRequest) error {
 		return err
 	}
 
-	lg.readEngine = engine
+	lg.readEngine.Store(engine)
 	lg.logger.Info("read load configured",
 		"url", url,
 		"targetRps", cfg.TargetRPS,
@@ -120,6 +127,11 @@ func (lg *LoadGenerator) readHeadBlock(client rpc.Client) uint64 {
 // sampleConfirmedTxHash returns a recently-confirmed transaction hash for
 // eth_getTransactionReceipt, or false when none is available.
 //
+// Sampled UNIFORMLY over the buffer rather than always taking the newest entry: every
+// entry is equally inside a pruned node's horizon, and always returning the newest would
+// point every concurrent getReceipt read at one hash — the same mistake as calling
+// totalSupply() for eth_call, which measures a cache rather than the read path.
+//
 // The slice is read without clearing it: incremental verification drains the same
 // buffer, so it is legitimately empty at times, and the engine counts those as skips
 // rather than pretending to have issued a read.
@@ -131,31 +143,26 @@ func (lg *LoadGenerator) sampleConfirmedTxHash() (string, bool) {
 	if n == 0 {
 		return "", false
 	}
-	// Most recent hash: it is certain to be within a pruned node's horizon.
-	return lg.recentConfirmedHashes[n-1], true
+	return lg.recentConfirmedHashes[rand.IntN(n)], true
 }
 
 // startReadLoad begins read traffic. Safe to call when read load is not configured.
 func (lg *LoadGenerator) startReadLoad() {
-	if lg.readEngine == nil {
-		return
+	if e := lg.readEngine.Load(); e != nil {
+		e.Start(lg.ctx)
 	}
-	lg.readEngine.Start(lg.ctx)
 }
 
 // stopReadLoad ends read traffic. Safe to call when read load is not configured or
 // already stopped.
 func (lg *LoadGenerator) stopReadLoad() {
-	if lg.readEngine == nil {
-		return
+	if e := lg.readEngine.Load(); e != nil {
+		e.Stop()
 	}
-	lg.readEngine.Stop()
 }
 
 // readLoadMetrics returns a read-path snapshot, or nil when read load is not enabled.
 func (lg *LoadGenerator) readLoadMetrics() *types.ReadLoadMetrics {
-	if lg.readEngine == nil {
-		return nil
-	}
-	return lg.readEngine.Metrics()
+	// Metrics() is nil-safe, but Load() may legitimately return nil before setup runs.
+	return lg.readEngine.Load().Metrics()
 }

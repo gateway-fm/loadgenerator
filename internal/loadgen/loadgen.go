@@ -173,7 +173,10 @@ type LoadGenerator struct {
 	// starts no read goroutines and allocates no read client. The engine deliberately
 	// shares none of the counters above: read errors must never reach the write-side
 	// circuit breaker or the adaptive controller's pending count.
-	readEngine *readload.Engine
+	//
+	// Atomic because it is written from the initialization goroutine and read from HTTP
+	// handlers (`/v1/status` is polled throughout initialization to show initPhase).
+	readEngine atomic.Pointer[readload.Engine]
 
 	// Test history (in-memory cache for backwards compatibility)
 	testHistory   []types.TestResult

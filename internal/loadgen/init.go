@@ -367,20 +367,10 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		}
 	}
 
-	// Deploy contracts if needed for non-ETH-transfer types
-	// For realistic mode, check if any non-ETH tx types are configured
-	txTypeForDeploy := req.TransactionType
-	if workload.UsesRealisticMix(req.Pattern) && req.RealisticConfig != nil {
-		ratios := req.RealisticConfig.TxTypeRatios
-		if ratios.UniswapSwap > 0 {
-			// Uniswap needs special complex builder deployment
-			txTypeForDeploy = types.TxTypeUniswapSwap
-		} else if ratios.ERC20Transfer > 0 || ratios.ERC20Approve > 0 ||
-			ratios.StorageWrite > 0 || ratios.HeavyCompute > 0 {
-			// Other contract types use standard deployment
-			txTypeForDeploy = types.TxTypeERC20Transfer
-		}
-	}
+	// Which contracts to deploy. Derived by workload.DeployTxTypeFor so this decision
+	// and the workers' tx-type selection read the SAME config — including the default
+	// config the workers fall back to when none was supplied.
+	txTypeForDeploy := workload.DeployTxTypeFor(req)
 
 	// Phase: Deploying contracts
 	if txTypeForDeploy != types.TxTypeEthTransfer {

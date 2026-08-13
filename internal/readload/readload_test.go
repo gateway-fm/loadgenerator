@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -94,7 +96,8 @@ func TestValidate(t *testing.T) {
 			c.Mix.GetLogs = -10
 		}, "must be 0-100"},
 		{"bad selection", func(c *types.ReadLoadConfig) { c.BlockSelection = "ancient" }, "invalid readLoad.blockSelection"},
-		{"archive depth out of range", func(c *types.ReadLoadConfig) { c.ArchiveDepthPct = 101 }, "archiveDepthPct must be 1-100"},
+		{"archive depth out of range", func(c *types.ReadLoadConfig) { c.ArchiveDepthPct = 101 }, "archiveDepthPct must be 0-100"},
+		{"archive depth 0 means default", func(c *types.ReadLoadConfig) { c.ArchiveDepthPct = 0 }, ""},
 		{"negative concurrency", func(c *types.ReadLoadConfig) { c.Concurrency = -1 }, "concurrency cannot be negative"},
 		{"logs range exceeds window", func(c *types.ReadLoadConfig) {
 			c.BlockWindow = 10
@@ -567,6 +570,68 @@ func TestUnavailableTargetIsSkippedAndCounted(t *testing.T) {
 	}
 	if e.Metrics().ReadsSent != 0 {
 		t.Errorf("expected no reads sent when no target was available, got %d", e.Metrics().ReadsSent)
+	}
+}
+
+// A per-request timeout must be COUNTED as an error, never fatal to the worker.
+// http.Client.Timeout expiry unwraps to context.DeadlineExceeded, so returning on that
+// removes the worker from the pool on its first slow read — and eth_getLogs at high
+// transaction rates is exactly the request that breaches the read timeout. The failure
+// is silent in the worst way: `sent` is incremented above the early return and `errors`
+// below it, so read load stops with zero recorded errors and only rateShortfall set,
+// which reads as the target's fault.
+//
+// Uses a real HTTP client against a deliberately slow server, because a mock returning
+// a plain error cannot reach this path.
+func TestSlowReadIsCountedAndWorkerSurvives(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(250 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x0"}`))
+	}))
+	defer srv.Close()
+
+	clientCfg := rpc.DefaultClientConfig(srv.URL)
+	clientCfg.Timeout = 40 * time.Millisecond
+	clientCfg.MaxRetries = 0
+	client := rpc.NewHTTPClient(clientCfg)
+
+	// Pin the premise: the timeout really does present as context.DeadlineExceeded.
+	_, callErr := client.Call(context.Background(), types.ReadMethodGetBalance, []any{"0x01", "latest"})
+	if callErr == nil {
+		t.Fatal("expected the slow server to time the client out")
+	}
+	if !errors.Is(callErr, context.DeadlineExceeded) {
+		t.Logf("note: client timeout did not unwrap to context.DeadlineExceeded (%v); "+
+			"the regression this test guards is then unreachable by that route", callErr)
+	}
+
+	cfg := baseCfg()
+	cfg.TargetRPS = 200
+	cfg.Concurrency = 8
+	cfg.Mix = types.ReadMix{GetBalance: 100}
+
+	e, err := New(cfg, client, testTargets(5000), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	e.Start(context.Background())
+	time.Sleep(700 * time.Millisecond)
+	e.Stop()
+
+	m := e.Metrics()
+	// With the bug each worker issues exactly one request and exits, so sent equals the
+	// worker count. Compare against the engine's ACTUAL pool size, not the requested
+	// one, since New floors it at minConcurrency.
+	if m.ReadsSent <= uint64(e.concurrency) {
+		t.Fatalf("workers stopped issuing reads after their first timeout: sent=%d with %d workers",
+			m.ReadsSent, e.concurrency)
+	}
+	if m.ReadErrors == 0 {
+		t.Fatal("timeouts were not counted as read errors")
+	}
+	if m.ReadErrors != m.ReadsSent {
+		t.Errorf("every read timed out, so errors (%d) should equal sent (%d)", m.ReadErrors, m.ReadsSent)
 	}
 }
 

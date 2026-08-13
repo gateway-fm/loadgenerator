@@ -34,20 +34,14 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 	signer := ethtypes.NewLondonSigner(chainID)
 	rnd := account.NewRand() // Thread-safe random for realistic mode
 
-	// Check if we should use realistic TX generation (mixed types and random tips)
-	// Both "realistic" and "adaptive-realistic" patterns use this
-	useRealisticTxGen := workload.UsesRealisticMix(lg.testConfig.Pattern)
-
-	// Get realistic config - use provided config or defaults for adaptive-realistic
-	var realisticCfg *types.RealisticTestConfig
-	if useRealisticTxGen {
-		if lg.testConfig.RealisticConfig != nil {
-			realisticCfg = lg.testConfig.RealisticConfig
-		} else {
-			// Use defaults for adaptive-realistic pattern
-			realisticCfg = workload.DefaultRealisticConfig()
-		}
-	}
+	// Realistic TX generation (mixed types and random tips) for both "realistic" and
+	// "adaptive-realistic". The config resolved here — provided, or the defaults for
+	// adaptive-realistic — is the SAME one the contract-deployment decision reads, via
+	// workload.EffectiveRealisticConfig. They must never diverge: when they did, the
+	// deploy step saw "no mix" while these workers still selected erc20Transfer and
+	// uniswapSwap, and the transactions went to the zero address.
+	realisticCfg := workload.EffectiveRealisticConfig(lg.testConfig.Pattern, lg.testConfig.RealisticConfig)
+	useRealisticTxGen := realisticCfg != nil
 
 	// For non-realistic mode, get the single builder
 	var defaultBuilder txbuilder.Builder

@@ -254,7 +254,8 @@ func Validate(cfg types.ReadLoadConfig) error {
 		return fmt.Errorf("readLoad.logsRangeBlocks cannot be negative, got %d", cfg.LogsRangeBlocks)
 	}
 	if cfg.ArchiveDepthPct < 0 || cfg.ArchiveDepthPct > 100 {
-		return fmt.Errorf("readLoad.archiveDepthPct must be 1-100, got %d", cfg.ArchiveDepthPct)
+		return fmt.Errorf("readLoad.archiveDepthPct must be 0-100 (0 = default %d), got %d",
+			defaultArchiveDepthPct, cfg.ArchiveDepthPct)
 	}
 	if cfg.Concurrency < 0 {
 		return fmt.Errorf("readLoad.concurrency cannot be negative, got %d", cfg.Concurrency)
@@ -497,14 +498,25 @@ func (e *Engine) worker(ctx context.Context, id int) {
 		_, err := e.client.Call(ctx, method, params)
 		latMs := float64(time.Since(start).Microseconds()) / 1000.0
 
+		// A request aborted by our own shutdown is not a read we performed, so it is
+		// counted neither as sent nor as an error. That keeps the invariant
+		// sent == successes + errors exact, and keeps readRps free of shutdown noise.
+		if err != nil && ctx.Err() != nil {
+			return
+		}
+
 		atomic.AddUint64(&st.count, 1)
 		atomic.AddUint64(&e.sent, 1)
 
 		if err != nil {
-			// A cancellation at shutdown is a boundary artefact, not a read error.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return
-			}
+			// Everything reaching here — per-request timeouts INCLUDED — is counted and
+			// the worker carries on. Testing the error for context.DeadlineExceeded
+			// would be wrong: http.Client.Timeout expiry unwraps to exactly that, so one
+			// slow read would remove the worker from the pool permanently, and
+			// eth_getLogs at high transaction rates is precisely the request that
+			// breaches the read timeout. That failure is silent in the worst way — read
+			// load stops with zero recorded errors and only rateShortfall set, which
+			// reads as a limit at the target rather than a defect here.
 			atomic.AddUint64(&st.errors, 1)
 			atomic.AddUint64(&e.errs, 1)
 			continue
