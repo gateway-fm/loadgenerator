@@ -60,16 +60,38 @@ and ladder reads independently. This is *why* the read rate must never be folded
 p99 X ms". Today we can state half of that. UC4 is UC2+UC3 written down as a number
 pair with a latency bound.
 
-### UC5 — Evidence for the archive boundary
+### UC5 — Characterise **archive and non-archive** read serving, as separate products
 
-`execution.caching.archive` is false (Nitro default) and PRST-4262 confirmed offline
-pruning removes ~87% of the database. Historical state queries beyond ~128 blocks
-fail outright. This is worth stating in customer conversations in its own right:
-**this configuration serves current state well and cannot serve historical state at
-all.** Anyone needing archive queries needs a separate archive node, which changes the
-storage model completely — no pruning, no non-archive mode, the 87% reclaim does not
-apply. A one-shot probe that deliberately queries deep history and records the exact
-failure is a deliverable, not a bug.
+GasStorm must be able to load-test both, because Gateway sells both. This is a
+first-class mode, not a probe that proves a failure.
+
+The two are different workloads, not the same workload with a different flag:
+
+| | non-archive (pruned) | archive |
+|---|---|---|
+| state reads target | `latest` / last ~128 blocks | **any block in history** |
+| working set | recent state, fits cache tiers | **whole history — cache hit rate collapses** |
+| storage | PRST-4262: pruning reclaims ~87% | no pruning, no reclaim; the cost model does not carry over |
+| what binds | RPC CPU + write amplification | almost certainly random-read IOPS |
+
+So the read generator needs a **block-selection dimension orthogonal to the method
+mix**: the same `eth_call` is a cheap cached lookup at `latest` and a cold random
+historical trie walk at block 40,000. Under archive selection, state-reading methods
+take a historical block tag instead of `latest`, and `eth_getLogs` windows can span
+far more than `blockWindow`.
+
+Two things follow, and both are requirements:
+
+- **Capability detection with fail-fast.** Archive selection against a pruned node
+  returns `missing trie node` / state-unavailable on essentially every call. That must
+  be detected at start and refused, **not** generated as a 100%-error run — an error
+  storm rendered as latency percentiles is indistinguishable from a performance result,
+  which is the same class of mistake as the 21,375 gas/tx arm.
+- **The archive boundary becomes a measured output rather than a claim.** Sweeping
+  depth until reads start failing locates the real horizon on a given node. For the
+  PoC chain that yields the customer-facing sentence directly: *this configuration
+  serves current state well and cannot serve historical state at all; archive is a
+  separate node with a separate storage model.*
 
 ### UC6 — Do not invalidate the existing corpus
 
@@ -170,11 +192,14 @@ Absent from every existing arm, so no recorded or future write-only result chang
 "readLoad": {
   "enabled": true,
   "targetRps": 3000,
-  "concurrency": 0,            // 0 = derive from targetRps x observed latency
-  "rpcUrl": "",                // "" = same public URL as writes
-  "blockWindow": 64,           // sample recent blocks within this many of head
-  "logsRangeBlocks": 16,       // bounded eth_getLogs span
-  "fullBlocks": false,         // eth_getBlockByNumber includeTxs
+  "concurrency": 0,             // 0 = derive from targetRps x observed latency
+  "rpcUrl": "",                 // "" = same public URL as writes
+  "blockSelection": "recent",   // latest | recent | archive   (see §3.7)
+  "blockWindow": 64,            // "recent": sample within this many blocks of head
+  "archiveDepthPct": 100,       // "archive": sample the deepest N% of history
+  "requireArchive": true,       // fail fast if the target is not archive
+  "logsRangeBlocks": 16,        // bounded eth_getLogs span
+  "fullBlocks": false,          // eth_getBlockByNumber includeTxs
   "mix": { "ethCall": 60, "getBalance": 15, "getLogs": 10,
            "getBlockByNumber": 10, "getReceipt": 5 }
 }
@@ -193,13 +218,16 @@ arms.
 
 ### 3.4 The read mix, and why each method is shaped this way
 
-Non-archive is the binding constraint: **randomise addresses, not blocks.** Randomising
-blocks mostly produces errors here and would measure our error path.
+Under the default `recent` selection, non-archive is the binding constraint:
+**randomise addresses, not blocks** — randomising blocks against a pruned node mostly
+produces errors and would measure our own error path. Under `archive` selection (§3.7)
+both are randomised, which is precisely what makes it the harder workload: the address
+randomises the slot and the block randomises the trie version, so nothing caches.
 
 | method | share | argument source | why |
 |---|---|---|---|
-| `eth_call` | 60 | ERC-20 `balanceOf(random funded account)` | **the UC1 instrument.** A random account randomises the storage slot, so each call is a fresh random state read that ARC data-caching either serves or does not. Never `totalSupply()` — one hot slot, always cached, measures nothing |
-| `eth_getBalance` | 15 | random funded account, `latest` | account-trie random read, different trie from `eth_call` |
+| `eth_call` | 60 | ERC-20 `balanceOf(random funded account)` at the selection's block tag | **the UC1 instrument.** A random account randomises the storage slot, so each call is a fresh random state read that ARC data-caching either serves or does not. Never `totalSupply()` — one hot slot, always cached, measures nothing |
+| `eth_getBalance` | 15 | random funded account, at the selection's block tag | account-trie random read, different trie from `eth_call` |
 | `eth_getLogs` | 10 | ERC-20 address + Transfer topic, random `logsRangeBlocks` window inside `blockWindow` | the only heavy read; **must be bounded** or it is a self-DoS |
 | `eth_getBlockByNumber` | 10 | random block within `blockWindow`, `includeTxs=false` | cheap by default; see egress note |
 | `eth_getTransactionReceipt` | 5 | recently-confirmed hash sampled from the generator's own tracking | realistic (clients poll receipts) and needs no extra bookkeeping |
@@ -237,6 +265,55 @@ response can be large. `eth_getBlockByNumber` with `includeTxs=true` at 1500 tx/
 returns ~375 full transactions per block — at 300 rps that is plausibly tens of MB/s
 of egress, dwarfing the write-side figure. Hence `fullBlocks: false` by default, and
 egress belongs in the per-arm capture list.
+
+### 3.7 Block selection: archive and non-archive in one engine
+
+`blockSelection` is orthogonal to `mix`. The mix decides *which* method; the selection
+decides *at what block*, which is what actually determines whether a read is cached or
+a cold trie walk.
+
+| mode | state reads (`eth_call`, `getBalance`) | `getBlockByNumber` / `getLogs` | valid against |
+|---|---|---|---|
+| `latest` | block tag `"latest"` | head | any node |
+| `recent` (default) | random block within `blockWindow` of head | same window | any node — stays inside the ~128-block non-archive horizon |
+| `archive` | **random block over the deepest `archiveDepthPct`% of history** | full-history windows | archive nodes only |
+
+Only the block-tag argument changes, so one engine and one mix serve both products.
+`recent` is the default because it is safe everywhere; `archive` must be asked for.
+
+**Capability probe at start, before any load.** Read the head, then attempt one
+`eth_getBalance(<addr>, 0x1)` (or the shallowest block the mode will touch):
+
+- probe succeeds → target is archive; proceed.
+- probe fails with a state-unavailable error (`missing trie node`, `state not
+  available`, Nitro's equivalent) → target is pruned. If `requireArchive` is true
+  (default under `archive` selection), **refuse to start** and say so. Never emit an
+  error-storm run dressed up as latency percentiles.
+- `blockSelection` is `latest`/`recent` → probe is informational only; log what the
+  target supports so every result carries it.
+
+Record the detected capability in the run's `EnvironmentSnapshot`, so an archive and a
+non-archive result can never be silently compared later.
+
+**Depth sweep gives the boundary as a measurement.** Lowering `archiveDepthPct` walks
+the sampling window from deep history toward the head; the depth at which reads stop
+failing *is* the node's real horizon. That replaces the assumed "~128 blocks" with a
+number, and produces the UC5 customer sentence as evidence.
+
+**Validation dependency — flagging early because it has a lead time.** The PoC Nitro
+chain is deliberately non-archive and pruned, so `archive` mode **cannot be validated
+on it**. Two options, and I recommend the first:
+
+1. **Add an archive-enabled RPC replica to the `arbitrum-devnet-poc` chart**
+   (`execution.caching.archive=true`, pruning off) as a second read target on the same
+   chain. Self-contained, and it turns UC5 into a genuine A/B: identical chain,
+   identical read load, archive vs pruned RPC. That directly measures what archive
+   *costs* — extra disk and extra p99 — which is the customer-facing number. It also
+   needs a disk-budget check first: the storage nodes' `ssd` VG has only ~145 GiB free
+   and the un-pruned copy forgoes the ~87% reclaim.
+2. Point reads read-only at an existing internal archive RPC. Cheaper, but a different
+   chain, stack and hardware, so it validates the *code* and yields no comparable
+   number.
 
 ---
 
@@ -315,7 +392,8 @@ Two constraints from PRST-4262 dominate the schedule and are not negotiable:
 | R1 | 0 | ladder 500→ceiling | read path alone: reads/s per replica, where p99 breaks, where the RPC tier falls behind the feed |
 | R2 | 1500 | 0 / 1000 / 3000 / 6000 | **UC3.** Fresh chain per rung. Does read load move the write ceiling |
 | R3a/R3b | 1500 | chosen rate from R2 | **UC1.** `primarycache=all` vs `metadata`, matched elapsed, grown state. The decision arm |
-| R4 | — | one-shot historical probe | **UC5.** Record exact failures beyond the pruning horizon |
+| R4 | — | depth sweep, `blockSelection=archive` | **UC5a.** Locate the pruned node's real horizon; expect refusal/failure and record where |
+| R5a/R5b | 1500 | chosen rate, `archive` selection | **UC5b.** Archive RPC vs pruned RPC, same chain, same load. What archive costs in disk and p99. Gated on the archive replica (§3.7) |
 
 R0 before anything else: it is the cheapest arm and the only one that can invalidate
 all the others.
@@ -338,6 +416,7 @@ and LB egress bytes.
 | `run-arm.sh` read-rate parameter + read latency reported | implementation |
 | re-run `primarycache` comparison with read load | **R3a/R3b** |
 | `adaptive-realistic` guard | §4 (plus the underlying `init.go` fix) |
+| *(added to scope)* support archive **and** non-archive RPC targets | §3.7, R4, R5a/R5b — needs the archive replica |
 
 Note for the final write-up: existing PRST-4262 results must be **labelled
 write-only**, not left to imply they cover a full RPC workload.
