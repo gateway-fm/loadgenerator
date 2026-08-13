@@ -300,20 +300,21 @@ the sampling window from deep history toward the head; the depth at which reads 
 failing *is* the node's real horizon. That replaces the assumed "~128 blocks" with a
 number, and produces the UC5 customer sentence as evidence.
 
-**Validation dependency — flagging early because it has a lead time.** The PoC Nitro
-chain is deliberately non-archive and pruned, so `archive` mode **cannot be validated
-on it**. Two options, and I recommend the first:
+**Archive validation is DEFERRED — decided 2026-08-13.** The capability ships now
+(`blockSelection`, the probe, the depth sweep) but is not exercised in this campaign.
+The PoC Nitro chain is deliberately pruned, and its storage nodes have only ~145 GiB
+free on the `ssd` VG, so an un-pruned copy — which forgoes the ~87% pruning reclaim —
+does not fit alongside the existing chain.
 
-1. **Add an archive-enabled RPC replica to the `arbitrum-devnet-poc` chart**
-   (`execution.caching.archive=true`, pruning off) as a second read target on the same
-   chain. Self-contained, and it turns UC5 into a genuine A/B: identical chain,
-   identical read load, archive vs pruned RPC. That directly measures what archive
-   *costs* — extra disk and extra p99 — which is the customer-facing number. It also
-   needs a disk-budget check first: the storage nodes' `ssd` VG has only ~145 GiB free
-   and the un-pruned copy forgoes the ~87% reclaim.
-2. Point reads read-only at an existing internal archive RPC. Cheaper, but a different
-   chain, stack and hardware, so it validates the *code* and yields no comparable
-   number.
+Archive gets tested on the larger servers, in the multi-day runs planned there. That is
+the right home for it anyway: archive's defining cost is that the working set is the
+whole history, which only becomes visible once history is large, so a short arm on a
+small chain would measure the easy case and understate it — the same trap that makes a
+12-minute storage arm report 13x write amplification where 4 hours reports 51x.
+
+Default `blockSelection` is `recent`, so nothing here changes what the arms below do.
+When archive testing starts, the target must be an archive node: the probe refuses
+`archive` selection against a pruned one rather than producing an error storm.
 
 ---
 
@@ -392,8 +393,11 @@ Two constraints from PRST-4262 dominate the schedule and are not negotiable:
 | R1 | 0 | ladder 500→ceiling | read path alone: reads/s per replica, where p99 breaks, where the RPC tier falls behind the feed |
 | R2 | 1500 | 0 / 1000 / 3000 / 6000 | **UC3.** Fresh chain per rung. Does read load move the write ceiling |
 | R3a/R3b | 1500 | chosen rate from R2 | **UC1.** `primarycache=all` vs `metadata`, matched elapsed, grown state. The decision arm |
-| R4 | — | depth sweep, `blockSelection=archive` | **UC5a.** Locate the pruned node's real horizon; expect refusal/failure and record where |
-| R5a/R5b | 1500 | chosen rate, `archive` selection | **UC5b.** Archive RPC vs pruned RPC, same chain, same load. What archive costs in disk and p99. Gated on the archive replica (§3.7) |
+R0–R3 are this campaign. The archive arms below are **deferred to the multi-day runs on
+the larger servers** (§3.7) and are listed so the plan is complete, not to be run now.
+
+| ~~R4~~ | — | depth sweep, `blockSelection=archive` | **UC5a, deferred.** Locate a node's real pruning horizon |
+| ~~R5a/R5b~~ | 1500 | chosen rate, `archive` selection | **UC5b, deferred.** Archive vs pruned RPC: what archive costs in disk and p99 |
 
 R0 before anything else: it is the cheapest arm and the only one that can invalidate
 all the others.
@@ -416,7 +420,7 @@ and LB egress bytes.
 | `run-arm.sh` read-rate parameter + read latency reported | implementation |
 | re-run `primarycache` comparison with read load | **R3a/R3b** |
 | `adaptive-realistic` guard | §4 (plus the underlying `init.go` fix) |
-| *(added to scope)* support archive **and** non-archive RPC targets | §3.7, R4, R5a/R5b — needs the archive replica |
+| *(added to scope)* support archive **and** non-archive RPC targets | §3.7 — capability ships now; archive *testing* deferred to the multi-day runs on the larger servers |
 
 Note for the final write-up: existing PRST-4262 results must be **labelled
 write-only**, not left to imply they cover a full RPC workload.
