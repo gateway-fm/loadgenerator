@@ -16,7 +16,25 @@ ZFS-vs-LVM comparison — describes a write-only workload.
 Ordered by what actually blocks a decision. UC1 is the only one with a deadline
 attached (it gates a storage recommendation); the rest are cumulative value.
 
-### UC1 — Decide `primarycache=all` vs `primarycache=metadata` (blocking)
+> **UPDATE 2026-08-13 — UC1 is no longer blocking; PRST-4262 answered it.** Since this doc
+> was written, PRST-4262 merged (poc repo PR #4) with three findings that overtake UC1:
+> the nodes have two SSD classes and the chain had been on the **slow Kingston DC400s**;
+> `8x ARC does NOT fix it — the DC400 drives are the wall`; and re-run on the fast Micron
+> mirror, `primarycache=metadata` **halves sustainable state — keep the default**
+> (baseline `all`: 117.2 GiB, 6.04 h, 1,461.3 tx/s, never degraded).
+>
+> So the storage recommendation **has** been made (`primarycache=all`), and `metadata` lost
+> on the **write** path — by halving sustainable state, not for want of read load. The
+> paragraphs below overstate the case: read load may still move the margin, but it is no
+> longer the blocking question, and "the comparison likely inverts" is now a weak claim
+> against a variable that already lost decisively. R3a/R3b drop to nice-to-have.
+>
+> The consequence for the rest of this plan: the storage wall on the current PoC hardware is
+> the **drives**, so read-capacity arms there would measure the DC400s, not the read path.
+> The real read-capacity campaign belongs on the larger servers — the same place archive
+> testing went (§3.7).
+
+### UC1 — Decide `primarycache=all` vs `primarycache=metadata` (~~blocking~~ — see update above)
 
 The reason this ticket exists. Current PRST-4262 measurements at 1500 tx/s, matched
 elapsed:
@@ -392,7 +410,7 @@ Two constraints from PRST-4262 dominate the schedule and are not negotiable:
 | R0 | 1500 | `readLoad` absent | **UC6 regression gate.** Must reproduce the `prst4262-7` baseline. Run first; if it does not match, stop |
 | R1 | 0 | ladder 500→ceiling | read path alone: reads/s per replica, where p99 breaks, where the RPC tier falls behind the feed |
 | R2 | 1500 | 0 / 1000 / 3000 / 6000 | **UC3.** Fresh chain per rung. Does read load move the write ceiling |
-| R3a/R3b | 1500 | chosen rate from R2 | **UC1.** `primarycache=all` vs `metadata`, matched elapsed, grown state. The decision arm |
+| ~~R3a/R3b~~ | 1500 | chosen rate from R2 | **UC1 — demoted.** PRST-4262 settled `primarycache` (`all`; `metadata` halves sustainable state) and attributed the wall to the DC400 drives. Only worth re-running if reads are suspected of changing that margin, and then on the fast drives |
 R0–R3 are this campaign. The archive arms below are **deferred to the multi-day runs on
 the larger servers** (§3.7) and are listed so the plan is complete, not to be run now.
 
