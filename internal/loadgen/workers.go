@@ -36,8 +36,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 
 	// Check if we should use realistic TX generation (mixed types and random tips)
 	// Both "realistic" and "adaptive-realistic" patterns use this
-	useRealisticTxGen := lg.testConfig.Pattern == types.PatternRealistic ||
-		lg.testConfig.Pattern == types.PatternAdaptiveRealistic
+	useRealisticTxGen := workload.UsesRealisticMix(lg.testConfig.Pattern)
 
 	// Get realistic config - use provided config or defaults for adaptive-realistic
 	var realisticCfg *types.RealisticTestConfig

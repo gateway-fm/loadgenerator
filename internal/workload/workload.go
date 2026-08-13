@@ -9,6 +9,22 @@ import (
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
+// UsesRealisticMix reports whether a load pattern drives a weighted mix of
+// transaction types from RealisticConfig.TxTypeRatios, rather than a single fixed type.
+//
+// This predicate exists so that every decision derived from "does this run use a tx
+// mix" is made the same way. Previously the worker's type SELECTION covered both
+// realistic patterns while contract DEPLOYMENT, ratio VALIDATION and metrics init
+// checked PatternRealistic alone. For adaptive-realistic the two disagreed: an unset
+// transactionType defaults to eth-transfer, so the deploy step concluded no contracts
+// were needed and deployed none, while workers went on selecting erc20Transfer and
+// uniswapSwap. Those transactions were then built against the zero address —
+// 21,000 gas plus calldata, measured at 21,375 gas/tx where the intended 80/20 mix
+// should have cost 75,700. The run looked valid and was not (PRST-4262/PRST-4293).
+func UsesRealisticMix(pattern types.LoadPattern) bool {
+	return pattern == types.PatternRealistic || pattern == types.PatternAdaptiveRealistic
+}
+
 // SelectRandomTxType selects a transaction type based on the configured ratios.
 // Uses cumulative probability distribution to select based on weights.
 func SelectRandomTxType(ratios types.TxTypeRatio, rnd *account.Rand) types.TransactionType {

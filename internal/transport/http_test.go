@@ -401,6 +401,76 @@ func TestValidateStartRequest_Adaptive(t *testing.T) {
 	}
 }
 
+// Read load is opt-in. An absent block must validate exactly as before, so every
+// pre-existing write-only arm keeps behaving identically (PRST-4293).
+func TestValidateStartRequest_ReadLoad(t *testing.T) {
+	validMix := types.ReadMix{
+		EthCall: 60, GetBalance: 15, GetLogs: 10, GetBlockByNumber: 10, GetReceipt: 5,
+	}
+
+	tests := []struct {
+		name     string
+		readLoad *types.ReadLoadConfig
+		wantErr  string
+	}{
+		{"absent read load is valid", nil, ""},
+		{
+			"disabled read load skips validation",
+			&types.ReadLoadConfig{Enabled: false},
+			"",
+		},
+		{
+			"valid read load",
+			&types.ReadLoadConfig{Enabled: true, TargetRPS: 3000, Mix: validMix},
+			"",
+		},
+		{
+			"mix must sum to 100",
+			&types.ReadLoadConfig{Enabled: true, TargetRPS: 3000, Mix: types.ReadMix{EthCall: 50}},
+			"must sum to 100",
+		},
+		{
+			"targetRps must be positive",
+			&types.ReadLoadConfig{Enabled: true, TargetRPS: 0, Mix: validMix},
+			"targetRps must be positive",
+		},
+		{
+			"invalid block selection",
+			&types.ReadLoadConfig{Enabled: true, TargetRPS: 100, Mix: validMix, BlockSelection: "ancient"},
+			"invalid readLoad.blockSelection",
+		},
+		{
+			"archive selection is accepted",
+			&types.ReadLoadConfig{Enabled: true, TargetRPS: 100, Mix: validMix, BlockSelection: types.ReadBlockArchive},
+			"",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := types.StartTestRequest{
+				Pattern:      types.PatternConstant,
+				DurationSec:  60,
+				ConstantRate: 100,
+				ReadLoad:     tc.readLoad,
+			}
+			err := validateStartRequest(&req)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestValidateStartRequest_Realistic(t *testing.T) {
 	tests := []struct {
 		name    string

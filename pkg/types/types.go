@@ -115,6 +115,110 @@ type RealisticTestConfig struct {
 	TxTypeRatios    TxTypeRatio     `json:"txTypeRatios"`    // percentage per tx type
 }
 
+// ReadBlockSelection controls which block state-reading requests target. It is
+// orthogonal to ReadMix: the mix decides which method, the selection decides at what
+// block, and the block is what determines whether a read is served from cache or is a
+// cold trie walk.
+type ReadBlockSelection string
+
+const (
+	// ReadBlockLatest targets the "latest" tag. Valid against any node.
+	ReadBlockLatest ReadBlockSelection = "latest"
+	// ReadBlockRecent targets a random block within BlockWindow of head. Stays inside
+	// a pruned (non-archive) node's horizon, so it is valid against any node.
+	ReadBlockRecent ReadBlockSelection = "recent"
+	// ReadBlockArchive targets a random block over the deepest ArchiveDepthPct% of
+	// history. Requires an archive node; against a pruned node nearly every request
+	// fails with a state-unavailable error.
+	ReadBlockArchive ReadBlockSelection = "archive"
+)
+
+// Read RPC method names, used as the reporting keys in ReadMethodStats.
+const (
+	ReadMethodCall       = "eth_call"
+	ReadMethodGetBalance = "eth_getBalance"
+	ReadMethodGetLogs    = "eth_getLogs"
+	ReadMethodGetBlock   = "eth_getBlockByNumber"
+	ReadMethodGetReceipt = "eth_getTransactionReceipt"
+)
+
+// ReadMix defines the percentage share of each read method (must sum to 100).
+type ReadMix struct {
+	EthCall          int `json:"ethCall"`
+	GetBalance       int `json:"getBalance"`
+	GetLogs          int `json:"getLogs"`
+	GetBlockByNumber int `json:"getBlockByNumber"`
+	GetReceipt       int `json:"getReceipt"`
+}
+
+// Sum returns the total of all shares.
+func (m ReadMix) Sum() int {
+	return m.EthCall + m.GetBalance + m.GetLogs + m.GetBlockByNumber + m.GetReceipt
+}
+
+// ReadLoadConfig configures read-query load, which runs alongside transaction load at
+// an INDEPENDENT rate. It is opt-in: when absent or Enabled is false, no read
+// goroutines, clients or allocations exist and the run behaves exactly as a
+// write-only run.
+//
+// The read path deliberately shares nothing with the transaction path except the
+// context and the target addresses — not the rate limiter, not the pending counter,
+// and not the failure counters the write-side circuit breaker reads. Read errors must
+// never be able to throttle the write rate.
+type ReadLoadConfig struct {
+	Enabled     bool `json:"enabled"`
+	TargetRPS   int  `json:"targetRps"`             // read requests per second, independent of TargetTPS
+	Concurrency int  `json:"concurrency,omitempty"` // 0 = derive from TargetRPS
+
+	// RPCURL overrides the endpoint reads are sent to. Empty means the same endpoint
+	// as transaction submission, which is usually what you want — the read path being
+	// characterised includes the load balancer and ingress.
+	RPCURL string `json:"rpcUrl,omitempty"`
+
+	BlockSelection  ReadBlockSelection `json:"blockSelection,omitempty"`  // default: recent
+	BlockWindow     int                `json:"blockWindow,omitempty"`     // "recent": blocks behind head to sample
+	ArchiveDepthPct int                `json:"archiveDepthPct,omitempty"` // "archive": deepest N% of history (1-100)
+
+	// RequireArchive refuses to start when the target is not an archive node. Nil
+	// means the default for the selected mode: true for archive, false otherwise.
+	// Generating an error storm and reporting it as latency is never acceptable.
+	RequireArchive *bool `json:"requireArchive,omitempty"`
+
+	LogsRangeBlocks int  `json:"logsRangeBlocks,omitempty"` // bounded eth_getLogs span
+	FullBlocks      bool `json:"fullBlocks,omitempty"`      // eth_getBlockByNumber includeTxs (heavy: egress)
+
+	Mix ReadMix `json:"mix"`
+}
+
+// ReadMethodStats holds per-method read statistics. Per-method reporting is required,
+// not cosmetic: eth_getLogs is orders of magnitude dearer than eth_call, so a single
+// merged histogram turns "read p99" into a statement about the getLogs window size.
+type ReadMethodStats struct {
+	Method  string        `json:"method"`
+	Count   uint64        `json:"count"`
+	Errors  uint64        `json:"errors"`
+	Latency *LatencyStats `json:"latency,omitempty"`
+}
+
+// ReadLoadMetrics reports read-path results alongside — never inside — the
+// transaction counters, so a read-path regression cannot hide in the write numbers.
+type ReadLoadMetrics struct {
+	TargetRPS  int     `json:"targetRps"`
+	ReadRPS    float64 `json:"readRps"` // achieved
+	ReadsSent  uint64  `json:"readsSent"`
+	ReadErrors uint64  `json:"readErrors"`
+
+	BlockSelection ReadBlockSelection `json:"blockSelection"`
+	ArchiveTarget  bool               `json:"archiveTarget"` // capability probe result
+
+	// RateShortfall marks that the generator could not offer TargetRPS. Reported
+	// explicitly because a silent shortfall reads as a server-side limit.
+	RateShortfall bool `json:"rateShortfall"`
+
+	Latency  *LatencyStats     `json:"latency,omitempty"` // all methods pooled
+	ByMethod []ReadMethodStats `json:"byMethod,omitempty"`
+}
+
 // TipHistogramBucket for reporting tip distribution.
 type TipHistogramBucket struct {
 	MinGwei float64 `json:"minGwei"`
@@ -199,6 +303,9 @@ type TestMetrics struct {
 	PreconfLatency *LatencyStats `json:"preconfLatency,omitempty"` // Preconfirmation latency (send to preconfirmed)
 	PendingLatency *LatencyStats `json:"pendingLatency,omitempty"` // Pending latency (send to pending)
 
+	// Read-query load metrics (nil when read load is not enabled)
+	ReadLoad *ReadLoadMetrics `json:"readLoad,omitempty"`
+
 	// Realistic test specific metrics
 	TipHistogram   []TipHistogramBucket `json:"tipHistogram,omitempty"`
 	TxTypeMetrics  []TxTypeMetrics      `json:"txTypeMetrics,omitempty"`
@@ -282,6 +389,10 @@ type StartTestRequest struct {
 
 	// Realistic pattern
 	RealisticConfig *RealisticTestConfig `json:"realisticConfig,omitempty"`
+
+	// Read-query load, opt-in and rate-controlled independently of the transaction
+	// rate. Absent means a pure write-only run, byte-for-byte the previous behaviour.
+	ReadLoad *ReadLoadConfig `json:"readLoad,omitempty"`
 
 	// Privacy proxy mode
 	PrivacyMode bool `json:"privacyMode,omitempty"`

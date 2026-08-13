@@ -18,6 +18,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/ratelimit"
+	"github.com/gateway-fm/loadgenerator/internal/readload"
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/sender"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
@@ -40,13 +41,13 @@ type LoadGenerator struct {
 	builderClient        rpc.Client
 	privacyBuilderClient rpc.Client // Privacy-routed builder client (optional)
 	l2Client             rpc.Client
-	accountMgr    AccountManager
-	patternReg    *pattern.Registry
-	txBuilderReg  *txbuilder.Registry
-	metricsCol    metrics.Collector
-	deployer      ContractDeployer
-	storage       storage.Storage
-	cacheStorage  storage.CacheStorage
+	accountMgr           AccountManager
+	patternReg           *pattern.Registry
+	txBuilderReg         *txbuilder.Registry
+	metricsCol           metrics.Collector
+	deployer             ContractDeployer
+	storage              storage.Storage
+	cacheStorage         storage.CacheStorage
 
 	// Contract addresses
 	erc20Contract       common.Address
@@ -168,6 +169,12 @@ type LoadGenerator struct {
 	sender        TxSender
 	defaultSender TxSender // Original sender (restored after privacy-mode tests)
 
+	// Read-query load. Nil unless the test config enables it, so a write-only run
+	// starts no read goroutines and allocates no read client. The engine deliberately
+	// shares none of the counters above: read errors must never reach the write-side
+	// circuit breaker or the adaptive controller's pending count.
+	readEngine *readload.Engine
+
 	// Test history (in-memory cache for backwards compatibility)
 	testHistory   []types.TestResult
 	testHistoryMu sync.RWMutex
@@ -212,7 +219,6 @@ type LoadGenerator struct {
 	// Logger
 	logger *slog.Logger
 }
-
 
 // Option configures a LoadGenerator. Use WithXxx functions to override defaults.
 type Option func(*LoadGenerator)
@@ -348,7 +354,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	// required = target_tps × avg_rpc_latency_sec (e.g., 30k × 0.02 = 600 minimum)
 	if lg.sender == nil {
 		lg.sender = sender.New(sender.Config{
-			Client:      lg.builderClient,
+			Client: lg.builderClient,
 			// 8000, raised from 2000 for PRST-4262: the sender pool is now up
 			// to maxSenderWorkers (2000) goroutines and each consumes one
 			// semaphore slot per BATCH, so 2000 would let a single round of
@@ -417,7 +423,7 @@ func (lg *LoadGenerator) StartTest(req types.StartTestRequest) error {
 	lg.testConfig = req
 
 	// Validate realistic config if provided
-	if req.Pattern == types.PatternRealistic && req.RealisticConfig != nil {
+	if workload.UsesRealisticMix(req.Pattern) && req.RealisticConfig != nil {
 		if err := workload.ValidateTxTypeRatios(req.RealisticConfig.TxTypeRatios); err != nil {
 			lg.setError(fmt.Sprintf("invalid realistic config: %v", err))
 			return err
@@ -460,6 +466,11 @@ func (lg *LoadGenerator) stopTest() {
 	if !atomic.CompareAndSwapInt32(&lg.stopping, 0, 1) {
 		return
 	}
+
+	// Stop read load first, so its elapsed window matches the load phase rather than
+	// being stretched by the post-test confirmation and verification sequence (which
+	// would understate the achieved read rate).
+	lg.stopReadLoad()
 
 	// Stop incremental verification and run final snapshot
 	lg.stopIncrementalVerification()
@@ -645,4 +656,3 @@ func (lg *LoadGenerator) setError(msg string) {
 	lg.statusMu.Unlock()
 	lg.logger.Error("test error", "error", msg)
 }
-

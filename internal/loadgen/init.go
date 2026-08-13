@@ -18,6 +18,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/sender"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -133,7 +134,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// is supported — contract types need a funded deployer and on-chain token state.
 	lg.gasless = req.Gasless || lg.cfg.Gasless
 	if lg.gasless {
-		if req.TransactionType != types.TxTypeEthTransfer || req.Pattern == types.PatternRealistic {
+		if req.TransactionType != types.TxTypeEthTransfer || workload.UsesRealisticMix(req.Pattern) {
 			lg.setError("gasless mode supports the eth-transfer transaction type only (contract types require a funded deployer)")
 			return
 		}
@@ -369,7 +370,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Deploy contracts if needed for non-ETH-transfer types
 	// For realistic mode, check if any non-ETH tx types are configured
 	txTypeForDeploy := req.TransactionType
-	if req.Pattern == types.PatternRealistic && req.RealisticConfig != nil {
+	if workload.UsesRealisticMix(req.Pattern) && req.RealisticConfig != nil {
 		ratios := req.RealisticConfig.TxTypeRatios
 		if ratios.UniswapSwap > 0 {
 			// Uniswap needs special complex builder deployment
@@ -480,7 +481,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	atomic.StoreUint64(&lg.preconfGaps, 0)
 
 	// Initialize realistic test metrics tracking
-	if req.Pattern == types.PatternRealistic {
+	if workload.UsesRealisticMix(req.Pattern) {
 		lg.metricsCol.InitRealisticMetrics()
 	}
 
@@ -655,6 +656,14 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
 	allAccounts = append(allAccounts, dynamicAccounts...)
 
+	// Configure read load before any worker starts, so an unsuitable target (archive
+	// selection against a pruned node, a missing ERC-20 for eth_call) aborts the test
+	// here rather than producing a run whose reads measure nothing.
+	if err := lg.setupReadLoad(req); err != nil {
+		lg.setError(fmt.Sprintf("read load configuration failed: %v", err))
+		return
+	}
+
 	// Start sender workers
 	// More workers = better parallelism, but must not exceed semaphore capacity
 	numWorkers := len(allAccounts)
@@ -669,6 +678,9 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		lg.wg.Add(1)
 		go lg.senderWorker(i, allAccounts)
 	}
+
+	// Start read load alongside the senders, at its own independent rate
+	lg.startReadLoad()
 
 	// Start TPS calculator
 	lg.wg.Add(1)

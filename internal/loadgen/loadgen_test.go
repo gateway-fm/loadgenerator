@@ -13,6 +13,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/execnode"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -304,6 +305,79 @@ func TestStartTest_ValidatesRealisticConfig(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error for invalid realistic config ratios")
+	}
+}
+
+// PRST-4293 regression. Ratio validation used to be gated on PatternRealistic alone,
+// so adaptive-realistic accepted a mix that did not sum to 100 — and SelectRandomTxType
+// then routed every unallocated share to heavyCompute at 500k gas, silently.
+func TestStartTest_ValidatesRealisticConfigForAdaptiveRealistic(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+
+	err := lg.StartTest(types.StartTestRequest{
+		Pattern:     types.PatternAdaptiveRealistic,
+		DurationSec: 10,
+		RealisticConfig: &types.RealisticTestConfig{
+			TargetTPS:   100,
+			NumAccounts: 10,
+			TxTypeRatios: types.TxTypeRatio{
+				EthTransfer: 50, // sums to 50, not 100
+			},
+		},
+	})
+
+	if err == nil {
+		t.Fatal("expected adaptive-realistic to reject a tx-type mix that does not sum to 100")
+	}
+}
+
+// PRST-4293 regression. The contract-deployment decision must be derived from
+// txTypeRatios for BOTH realistic patterns. It used to be gated on PatternRealistic,
+// so for adaptive-realistic the unset transactionType defaulted to eth-transfer, no
+// contracts were deployed, and every ERC-20/Uniswap transaction was built against the
+// zero address — 21,375 gas/tx measured where the 80/20 mix should have cost 75,700.
+func TestDeployTypeDerivedForBothRealisticPatterns(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern types.LoadPattern
+	}{
+		{"realistic", types.PatternRealistic},
+		{"adaptive-realistic", types.PatternAdaptiveRealistic},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !workload.UsesRealisticMix(tc.pattern) {
+				t.Fatalf("pattern %s must be treated as driving a tx-type mix", tc.pattern)
+			}
+
+			// Mirror the deployment decision in runInitialization: an unset
+			// transactionType has already defaulted to eth-transfer by this point.
+			req := types.StartTestRequest{
+				Pattern:         tc.pattern,
+				TransactionType: types.TxTypeEthTransfer,
+				RealisticConfig: &types.RealisticTestConfig{
+					TxTypeRatios: types.TxTypeRatio{ERC20Transfer: 80, UniswapSwap: 20},
+				},
+			}
+
+			txTypeForDeploy := req.TransactionType
+			if workload.UsesRealisticMix(req.Pattern) && req.RealisticConfig != nil {
+				ratios := req.RealisticConfig.TxTypeRatios
+				if ratios.UniswapSwap > 0 {
+					txTypeForDeploy = types.TxTypeUniswapSwap
+				} else if ratios.ERC20Transfer > 0 || ratios.ERC20Approve > 0 ||
+					ratios.StorageWrite > 0 || ratios.HeavyCompute > 0 {
+					txTypeForDeploy = types.TxTypeERC20Transfer
+				}
+			}
+
+			if txTypeForDeploy != types.TxTypeUniswapSwap {
+				t.Fatalf("expected Uniswap deployment for an 80/20 erc20/uniswap mix, got %q; "+
+					"contracts would not be deployed and txs would target the zero address",
+					txTypeForDeploy)
+			}
+		})
 	}
 }
 

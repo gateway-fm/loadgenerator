@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -133,13 +134,19 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		}
 	}
 
-	// Include realistic test metrics if pattern is realistic
-	if lg.testConfig.Pattern == types.PatternRealistic {
+	// Include realistic test metrics for any pattern that drives a tx-type mix.
+	// This previously covered "realistic" only, so an adaptive-realistic run reported
+	// no per-type metrics at all — which is precisely why a wrong mix went unnoticed.
+	if workload.UsesRealisticMix(lg.testConfig.Pattern) {
 		result.TipHistogram = lg.metricsCol.GetTipHistogram(lg.testConfig.RealisticConfig)
 		result.TxTypeMetrics = lg.metricsCol.GetTxTypeMetrics()
 		result.AccountsFunded = lg.accountMgr.GetAccountsFunded()
 		result.AccountsActive = len(lg.accountMgr.GetDynamicAccounts())
 	}
+
+	// Read-path metrics, reported alongside — never inside — the transaction counters
+	// so a read regression cannot hide in the write numbers. Nil when read load is off.
+	result.ReadLoad = lg.readLoadMetrics()
 
 	// Include initialization progress if initializing
 	if status == types.StatusInitializing {

@@ -560,6 +560,146 @@ components:
         # Realistic pattern
         realisticConfig:
           $ref: '#/components/schemas/RealisticTestConfig'
+        # Read-query load (opt-in)
+        readLoad:
+          $ref: '#/components/schemas/ReadLoadConfig'
+
+    ReadLoadConfig:
+      type: object
+      description: >
+        Read-query load, generated alongside transaction load at an INDEPENDENT rate so
+        read and write rates can be varied separately. Omit the block entirely for a
+        write-only run; nothing about the transaction path changes when it is absent.
+      required: [enabled, targetRps, mix]
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        targetRps:
+          type: integer
+          minimum: 1
+          description: Read requests per second, independent of targetTps
+        concurrency:
+          type: integer
+          minimum: 0
+          description: Read worker pool size. 0 derives it from targetRps.
+        rpcUrl:
+          type: string
+          description: >
+            Endpoint for reads. Empty means the same endpoint as transaction
+            submission, so the measured read path includes the load balancer and
+            ingress. Reads always use their own connection pool.
+        blockSelection:
+          $ref: '#/components/schemas/ReadBlockSelection'
+        blockWindow:
+          type: integer
+          minimum: 0
+          default: 64
+          description: '"recent" selection: how many blocks behind head to sample'
+        archiveDepthPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 100
+          description: >
+            "archive" selection: sample the deepest N% of history. Lowering it walks the
+            sampling window toward the head, which is how a node's real pruning horizon
+            is located.
+        requireArchive:
+          type: boolean
+          description: >
+            Refuse to start when the target cannot serve historical state. Defaults to
+            true for blockSelection=archive and false otherwise. Generating an error
+            storm and reporting it as latency is never a valid result.
+        logsRangeBlocks:
+          type: integer
+          minimum: 0
+          default: 16
+          description: >
+            Bounded eth_getLogs span. An unbounded range is a self-inflicted denial of
+            service and yields a bimodal latency distribution.
+        fullBlocks:
+          type: boolean
+          default: false
+          description: >
+            eth_getBlockByNumber includeTxs. Heavy: at high transaction rates a full
+            block carries hundreds of transactions and dominates egress.
+        mix:
+          $ref: '#/components/schemas/ReadMix'
+
+    ReadBlockSelection:
+      type: string
+      enum: [latest, recent, archive]
+      default: recent
+      description: >
+        Which block state-reading requests target, orthogonal to the method mix.
+        "latest" and "recent" are valid against any node; "archive" randomises the block
+        across history and requires an archive node.
+
+    ReadMix:
+      type: object
+      description: Percentage share of each read method (must sum to 100)
+      properties:
+        ethCall:
+          type: integer
+          description: ERC-20 balanceOf against a randomised account, so each call is a fresh random state read
+        getBalance:
+          type: integer
+        getLogs:
+          type: integer
+        getBlockByNumber:
+          type: integer
+        getReceipt:
+          type: integer
+
+    ReadLoadMetrics:
+      type: object
+      description: >
+        Read-path results, reported alongside and never inside the transaction
+        counters, so a read-path regression cannot hide in the write numbers.
+      properties:
+        targetRps:
+          type: integer
+        readRps:
+          type: number
+          description: Achieved read rate
+        readsSent:
+          type: integer
+        readErrors:
+          type: integer
+        blockSelection:
+          $ref: '#/components/schemas/ReadBlockSelection'
+        archiveTarget:
+          type: boolean
+          description: Whether the capability probe found the target able to serve historical state
+        rateShortfall:
+          type: boolean
+          description: >
+            True when the generator could not offer targetRps. Reported explicitly
+            because a silent shortfall reads as a server-side limit.
+        latency:
+          $ref: '#/components/schemas/LatencyStats'
+        byMethod:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReadMethodStats'
+
+    ReadMethodStats:
+      type: object
+      description: >
+        Per-method read statistics. Per-method reporting is required, not cosmetic:
+        eth_getLogs is orders of magnitude dearer than eth_call, so a single merged
+        histogram turns "read p99" into a statement about the getLogs window size.
+      properties:
+        method:
+          type: string
+          example: eth_call
+        count:
+          type: integer
+        errors:
+          type: integer
+        latency:
+          $ref: '#/components/schemas/LatencyStats'
 
     RealisticTestConfig:
       type: object
@@ -727,6 +867,8 @@ components:
           $ref: '#/components/schemas/LatencyStats'
         pendingLatency:
           $ref: '#/components/schemas/LatencyStats'
+        readLoad:
+          $ref: '#/components/schemas/ReadLoadMetrics'
         tipHistogram:
           type: array
           items:
