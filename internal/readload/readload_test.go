@@ -418,9 +418,11 @@ func TestProbe(t *testing.T) {
 		}
 	})
 
-	// A transport failure is not evidence about pruning; mislabelling it would put a
-	// wrong archive/non-archive label on every result from the run.
-	t.Run("transport error is not read as pruning", func(t *testing.T) {
+	// An unclassifiable probe error must not abort a run that does not need historical
+	// state. isStateUnavailable matches on error TEXT, and node implementations word
+	// this differently, so treating an unrecognised string as fatal would let a wording
+	// change disable read load entirely on the common path.
+	t.Run("unclassified error does not abort recent mode", func(t *testing.T) {
 		mc := &mockClient{head: 5000, callFn: func(_ context.Context, _ string, _ []any) (json.RawMessage, error) {
 			return nil, errors.New("connection refused")
 		}}
@@ -428,9 +430,29 @@ func TestProbe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		if err := e.Probe(context.Background()); err != nil {
+			t.Fatalf("recent mode must tolerate an unclassifiable probe error, got %v", err)
+		}
+		if e.Metrics().ArchiveTarget {
+			t.Error("an unclassified probe error must not label the target as archive")
+		}
+	})
+
+	// Archive mode is the one case that genuinely depends on the probe, so there an
+	// unclassifiable error must abort rather than risk an error-storm result.
+	t.Run("unclassified error aborts archive mode", func(t *testing.T) {
+		mc := &mockClient{head: 5000, callFn: func(_ context.Context, _ string, _ []any) (json.RawMessage, error) {
+			return nil, errors.New("connection refused")
+		}}
+		cfg := baseCfg()
+		cfg.BlockSelection = types.ReadBlockArchive
+		e, err := New(cfg, mc, testTargets(5000), nil)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
 		err = e.Probe(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "non-state reason") {
-			t.Fatalf("expected a non-state probe failure, got %v", err)
+			t.Fatalf("expected a non-state probe failure in archive mode, got %v", err)
 		}
 	})
 

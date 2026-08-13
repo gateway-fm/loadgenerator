@@ -342,10 +342,21 @@ func (e *Engine) Probe(ctx context.Context) error {
 	_, callErr := e.client.Call(ctx, types.ReadMethodGetBalance, []any{probeAddr, hexutil.EncodeUint64(1)})
 
 	archive := callErr == nil
-	if callErr != nil && !isStateUnavailable(callErr) {
-		// A transport-level failure is not evidence about pruning; surface it rather
-		// than mislabelling the node.
+	classified := callErr == nil || isStateUnavailable(callErr)
+	if !classified && RequireArchive(e.cfg) {
+		// Only a run that DEPENDS on historical state may be aborted by an
+		// unclassifiable probe error: there, proceeding risks an error-storm result.
 		return fmt.Errorf("readload: probe failed for a non-state reason: %w", callErr)
+	}
+	if !classified {
+		// latest/recent do not need historical state, so an error we cannot classify
+		// must not abort the run. isStateUnavailable matches on error *text*, and node
+		// implementations word this differently — treating an unrecognised string as
+		// fatal would let a wording change disable read load on the common path.
+		e.logger.Warn("read load: capability probe returned an unclassified error; "+
+			"assuming a non-archive target and continuing (block selection does not need history)",
+			"blockSelection", e.cfg.BlockSelection,
+			"error", callErr)
 	}
 
 	e.mu.Lock()
