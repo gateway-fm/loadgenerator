@@ -520,8 +520,8 @@ type AccountSetupConfig struct {
 // DefaultAccountSetupConfig returns a default account setup configuration.
 func DefaultAccountSetupConfig() AccountSetupConfig {
 	return AccountSetupConfig{
-		USDCAmount: new(big.Int).Mul(big.NewInt(10000), big.NewInt(1e6)),  // 10,000 USDC
-		WETHAmount: new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)),     // 5 ETH
+		USDCAmount: new(big.Int).Mul(big.NewInt(10000), big.NewInt(1e6)), // 10,000 USDC
+		WETHAmount: new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)),    // 5 ETH
 	}
 }
 
@@ -800,9 +800,18 @@ func (d *Deployer) deployContract(ctx context.Context, deployer *account.Account
 		})
 	} else {
 		tx = types.NewTx(&types.DynamicFeeTx{
-			ChainID:   d.chainID,
-			Nonce:     nonce,
-			GasTipCap: big.NewInt(0),
+			ChainID: d.chainID,
+			Nonce:   nonce,
+			// Tip must be NON-ZERO. A hardcoded zero tip only works on a chain that
+			// accepts zero-tip transactions, and most do not: op-geth ships a 1 wei
+			// floor, so deployment failed outright with
+			//   "transaction gas price below minimum: gas tip cap 0, minimum needed 1".
+			// Dropping the node's floor to 0 is not enough either — the transaction is
+			// then admitted to the pool but the miner never includes it, because its
+			// effective tip is 0, so the deploy just times out looking like a hung
+			// chain. Using gasPrice as the tip mirrors the legacy branch above; the
+			// effective tip stays bounded by GasFeeCap, so this cannot overpay.
+			GasTipCap: d.gasPrice,
 			GasFeeCap: d.gasPrice,
 			Gas:       8000000, // High gas limit for deployment
 			To:        nil,     // Contract creation
@@ -853,9 +862,18 @@ func (d *Deployer) sendTxReturnHash(ctx context.Context, sender *account.Account
 		})
 	} else {
 		tx = types.NewTx(&types.DynamicFeeTx{
-			ChainID:   d.chainID,
-			Nonce:     nonce,
-			GasTipCap: big.NewInt(0),
+			ChainID: d.chainID,
+			Nonce:   nonce,
+			// Tip must be NON-ZERO. A hardcoded zero tip only works on a chain that
+			// accepts zero-tip transactions, and most do not: op-geth ships a 1 wei
+			// floor, so deployment failed outright with
+			//   "transaction gas price below minimum: gas tip cap 0, minimum needed 1".
+			// Dropping the node's floor to 0 is not enough either — the transaction is
+			// then admitted to the pool but the miner never includes it, because its
+			// effective tip is 0, so the deploy just times out looking like a hung
+			// chain. Using gasPrice as the tip mirrors the legacy branch above; the
+			// effective tip stays bounded by GasFeeCap, so this cannot overpay.
+			GasTipCap: d.gasPrice,
 			GasFeeCap: d.gasPrice,
 			Gas:       500000, // Generous gas limit for contract calls
 			To:        &to,
@@ -922,9 +940,18 @@ func (d *Deployer) sendTxAndWaitForReceipt(ctx context.Context, sender *account.
 		})
 	} else {
 		tx = types.NewTx(&types.DynamicFeeTx{
-			ChainID:   d.chainID,
-			Nonce:     nonce,
-			GasTipCap: big.NewInt(0),
+			ChainID: d.chainID,
+			Nonce:   nonce,
+			// Tip must be NON-ZERO. A hardcoded zero tip only works on a chain that
+			// accepts zero-tip transactions, and most do not: op-geth ships a 1 wei
+			// floor, so deployment failed outright with
+			//   "transaction gas price below minimum: gas tip cap 0, minimum needed 1".
+			// Dropping the node's floor to 0 is not enough either — the transaction is
+			// then admitted to the pool but the miner never includes it, because its
+			// effective tip is 0, so the deploy just times out looking like a hung
+			// chain. Using gasPrice as the tip mirrors the legacy branch above; the
+			// effective tip stays bounded by GasFeeCap, so this cannot overpay.
+			GasTipCap: d.gasPrice,
 			GasFeeCap: d.gasPrice,
 			Gas:       gasLimit,
 			To:        &to,
