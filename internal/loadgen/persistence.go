@@ -559,18 +559,20 @@ func (lg *LoadGenerator) persistTestData(snapshot metrics.Snapshot, avgTPS float
 		testRun.TestAccounts.Accounts = append(testRun.TestAccounts.Accounts, dynamicAccounts[i].Address.Hex())
 	}
 
-	// Add realistic test specific metrics if applicable (both realistic and adaptive-realistic)
-	if lg.testConfig.Pattern == types.PatternRealistic || lg.testConfig.Pattern == types.PatternAdaptiveRealistic {
-		// Get the realistic config (use provided or defaults for adaptive-realistic)
-		realisticCfg := lg.testConfig.RealisticConfig
-		if realisticCfg == nil {
-			realisticCfg = workload.DefaultRealisticConfig()
-		}
+	// Add realistic test specific metrics if applicable (both realistic and
+	// adaptive-realistic). Resolved through the shared helper so this agrees with the
+	// deploy decision and the workers rather than repeating the fallback a third time.
+	if realisticCfg := workload.EffectiveRealisticConfig(lg.testConfig.Pattern, lg.testConfig.RealisticConfig); realisticCfg != nil {
 		testRun.TipHistogram = lg.metricsCol.GetTipHistogram(realisticCfg)
 		testRun.TxTypeMetrics = lg.metricsCol.GetTxTypeMetrics()
 		testRun.AccountsActive = len(lg.accountMgr.GetDynamicAccounts())
 		testRun.AccountsFunded = lg.accountMgr.GetAccountsFunded()
 	}
+
+	// Persist read-path results. Nil for a write-only run, so those rows are unchanged.
+	// The per-method breakdown is the part worth comparing across runs, and a live
+	// /v1/status poll only exists while the run does.
+	testRun.ReadLoad = lg.readLoadMetrics()
 
 	if err := lg.storage.CompleteTestRun(ctx, lg.currentTestID, testRun); err != nil {
 		lg.logger.Error("failed to complete test run in storage", "error", err)

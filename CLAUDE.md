@@ -104,6 +104,7 @@ Primary model for a persisted test run with summary statistics. Stored in SQLite
 | IsFavorite | bool | `isFavorite` | Whether test is starred |
 | Environment | *EnvironmentSnapshot | `environment` | Builder and load-gen config at test start |
 | Verification | *VerificationResult | `verification` | Post-test verification results |
+| ReadLoad | *ReadLoadMetrics | `readLoad` | Read-query results incl. per-method latency (nil for write-only runs) |
 | DeployedContracts | []DeployedContract | `deployedContracts` | Contract addresses deployed for test |
 | TestAccounts | *TestAccountsInfo | `testAccounts` | Account info (roles, counts) |
 

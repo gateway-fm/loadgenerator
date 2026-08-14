@@ -312,6 +312,131 @@ func TestUpdateTestRun(t *testing.T) {
 	}
 }
 
+// Read-path results must survive the run, including the per-method breakdown — that is
+// the part worth comparing across arms, and a live /v1/status poll disappears with the
+// process. Covers both read paths (GetTestRun and the list query) plus the write-only
+// case, since a nil pointer marshals to the string "null" (PRST-4293).
+func TestCompleteTestRun_PersistsReadLoad(t *testing.T) {
+	storage, cleanup := createTestStorage(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	run := &TestRun{
+		ID:              "test-readload",
+		StartedAt:       time.Now(),
+		Pattern:         types.PatternRealistic,
+		TransactionType: types.TxTypeERC20Transfer,
+		DurationMs:      600000,
+		Config:          &types.StartTestRequest{},
+		Status:          "running",
+		ExecutionLayer:  "cdk-erigon",
+	}
+	if err := storage.CreateTestRun(ctx, run); err != nil {
+		t.Fatalf("CreateTestRun failed: %v", err)
+	}
+
+	run.Status = "completed"
+	run.ReadLoad = &types.ReadLoadMetrics{
+		TargetRPS:      3000,
+		ReadRPS:        2987.4,
+		ReadsSent:      1792440,
+		ReadErrors:     118,
+		BlockSelection: types.ReadBlockRecent,
+		ArchiveTarget:  false,
+		RateShortfall:  false,
+		Latency:        &types.LatencyStats{Count: 100, P50: 4.2, P95: 31.7, P99: 88.1},
+		ByMethod: []types.ReadMethodStats{
+			{Method: types.ReadMethodCall, Count: 1075464, Errors: 3,
+				Latency: &types.LatencyStats{Count: 50, P50: 3.1, P99: 42.0}},
+			{Method: types.ReadMethodGetLogs, Count: 179244, Errors: 115,
+				Latency: &types.LatencyStats{Count: 50, P50: 210.5, P99: 1804.2}},
+		},
+	}
+
+	if err := storage.CompleteTestRun(ctx, "test-readload", run); err != nil {
+		t.Fatalf("CompleteTestRun failed: %v", err)
+	}
+
+	got, err := storage.GetTestRun(ctx, "test-readload")
+	if err != nil {
+		t.Fatalf("GetTestRun failed: %v", err)
+	}
+	if got.ReadLoad == nil {
+		t.Fatal("ReadLoad was not persisted")
+	}
+	if got.ReadLoad.TargetRPS != 3000 || got.ReadLoad.ReadsSent != 1792440 || got.ReadLoad.ReadErrors != 118 {
+		t.Errorf("counters round-tripped wrong: %+v", got.ReadLoad)
+	}
+	if got.ReadLoad.BlockSelection != types.ReadBlockRecent {
+		t.Errorf("BlockSelection = %q, want %q", got.ReadLoad.BlockSelection, types.ReadBlockRecent)
+	}
+	if got.ReadLoad.Latency == nil || got.ReadLoad.Latency.P99 != 88.1 {
+		t.Errorf("pooled latency lost: %+v", got.ReadLoad.Latency)
+	}
+	// The per-method breakdown is the whole point; assert it specifically.
+	if len(got.ReadLoad.ByMethod) != 2 {
+		t.Fatalf("ByMethod = %d entries, want 2", len(got.ReadLoad.ByMethod))
+	}
+	if got.ReadLoad.ByMethod[1].Method != types.ReadMethodGetLogs ||
+		got.ReadLoad.ByMethod[1].Latency == nil ||
+		got.ReadLoad.ByMethod[1].Latency.P99 != 1804.2 {
+		t.Errorf("per-method latency lost: %+v", got.ReadLoad.ByMethod[1])
+	}
+
+	// The list query is a separate scan path and must agree.
+	page, err := storage.ListTestRuns(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("ListTestRuns failed: %v", err)
+	}
+	var found bool
+	for _, r := range page.Runs {
+		if r.ID != "test-readload" {
+			continue
+		}
+		found = true
+		if r.ReadLoad == nil || len(r.ReadLoad.ByMethod) != 2 {
+			t.Errorf("list scan path lost ReadLoad: %+v", r.ReadLoad)
+		}
+	}
+	if !found {
+		t.Error("run missing from ListTestRuns")
+	}
+}
+
+// A write-only run must come back with no readLoad block at all, not a zero-valued one.
+func TestCompleteTestRun_WriteOnlyHasNoReadLoad(t *testing.T) {
+	storage, cleanup := createTestStorage(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &TestRun{
+		ID:              "test-writeonly",
+		StartedAt:       time.Now(),
+		Pattern:         types.PatternConstant,
+		TransactionType: types.TxTypeEthTransfer,
+		DurationMs:      1000,
+		Config:          &types.StartTestRequest{},
+		Status:          "running",
+		ExecutionLayer:  "reth",
+	}
+	if err := storage.CreateTestRun(ctx, run); err != nil {
+		t.Fatalf("CreateTestRun failed: %v", err)
+	}
+	run.Status = "completed"
+	if err := storage.CompleteTestRun(ctx, "test-writeonly", run); err != nil {
+		t.Fatalf("CompleteTestRun failed: %v", err)
+	}
+
+	got, err := storage.GetTestRun(ctx, "test-writeonly")
+	if err != nil {
+		t.Fatalf("GetTestRun failed: %v", err)
+	}
+	if got.ReadLoad != nil {
+		t.Errorf("write-only run came back with a readLoad block: %+v", got.ReadLoad)
+	}
+}
+
 func TestCompleteTestRun(t *testing.T) {
 	storage, cleanup := createTestStorage(t)
 	defer cleanup()

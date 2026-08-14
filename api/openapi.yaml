@@ -1003,6 +1003,8 @@ components:
           $ref: '#/components/schemas/EnvironmentSnapshot'
         verification:
           $ref: '#/components/schemas/VerificationResult'
+        readLoad:
+          $ref: '#/components/schemas/ReadLoadMetrics'
 
     EnvironmentSnapshot:
       type: object
