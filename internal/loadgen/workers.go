@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math/big"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -226,6 +225,21 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				if isNonceTooLow(sendErr) {
 					nonceVal.Commit()
 					metrics.AtomicSubSaturating(&lg.pendingCount, 1)
+					// Drop it from send tracking BEFORE counting the failure. The two
+					// causes are indistinguishable from the error alone: a predecessor
+					// consumed the nonce (this tx never lands), or this tx's own retried
+					// submit already landed (it will get a receipt — the builder client
+					// retries 429/502/503/504). In the second case the hash is still on
+					// chain, and the confirmation scan gates on GetTxSentTime, so leaving
+					// the entry counts one transaction in BOTH txFailed and txConfirmed
+					// and decrements pendingCount twice — corrupting the headline numbers
+					// and the adaptive controller's pending signal at once.
+					//
+					// Counted as a failed send rather than left pending on purpose:
+					// leaving it pending would inflate pendingCount for the whole run
+					// whenever the cause was a predecessor, and pendingCount drives the
+					// rate controller.
+					lg.metricsCol.DiscardTx(txHash)
 					lg.metricsCol.RecordTxFailed("send")
 					atomic.AddInt64(&lg.recentFails, 1)
 					go func() {
@@ -304,40 +318,54 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			// not reduce aggregate throughput because thousands of accounts are
 			// pipelined in parallel -- and it is also honest backpressure: a
 			// worker cannot outrun the chain's ability to accept its own stream.
-			var wg sync.WaitGroup
-			wg.Add(len(batchCallbacks))
+			// Acknowledgements arrive on a buffered channel sized to the batch, and the
+			// worker counts them itself. A WaitGroup plus a `go wg.Wait()` waiter would
+			// leak that goroutine permanently for every batch that timed out, because
+			// wg.Wait() keeps blocking after the select moves on — one leaked goroutine
+			// per timed-out batch, which a 24h soak accumulates. With a buffered channel
+			// there is no waiter to leak: a late callback simply writes into the buffer
+			// (capacity == batch size, so it can never block) and the channel is then
+			// garbage. The channel is per batch on purpose — a shared one would let a
+			// timed-out batch's late acks be miscounted as the next batch's.
+			acks := make(chan struct{}, len(batchCallbacks))
 			gated := make([]func(error), len(batchCallbacks))
 			for i, cb := range batchCallbacks {
 				inner := cb
 				gated[i] = func(err error) {
-					defer wg.Done()
 					inner(err)
+					acks <- struct{}{}
 				}
 			}
+
 			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, gated)
 			if queued {
-				// BOUNDED wait. A plain wg.Wait() deadlocks the worker for good if
-				// the callbacks never fire -- which a Sender implementation is not
+				// BOUNDED wait. Waiting unconditionally would wedge the worker for good
+				// if callbacks never fire — which a Sender implementation is not
 				// contractually obliged to guarantee, and which test doubles in
-				// particular do not (this hung the loadgen test suite for 600s).
-				// Give up waiting on shutdown or after a generous timeout and carry
-				// on: losing per-account ordering for one batch costs a resync,
-				// whereas a wedged worker costs the whole account for the run.
-				done := make(chan struct{})
-				go func() { wg.Wait(); close(done) }()
-				select {
-				case <-done:
-				case <-lg.ctx.Done():
-				case <-time.After(batchAckTimeout):
-					lg.logger.Debug("batch ack timed out; continuing without ordering guarantee",
-						"account", acc.Address.Hex(), "size", len(batchData))
+				// particular do not (this hung the loadgen suite for 600s). Give up on
+				// shutdown or after a generous timeout and carry on: losing per-account
+				// ordering for one batch costs a resync, whereas a wedged worker costs
+				// the whole account for the rest of the run.
+				timer := time.NewTimer(batchAckTimeout)
+				for remaining := len(gated); remaining > 0; {
+					select {
+					case <-acks:
+						remaining--
+					case <-lg.ctx.Done():
+						remaining = 0
+					case <-timer.C:
+						// Warn, not Debug: a stalled batch is the difference between
+						// "this run is valid" and "this account contributed nothing for
+						// 30 seconds", and Debug is off in a normal run.
+						lg.logger.Warn("batch ack timed out; continuing without ordering guarantee",
+							"account", acc.Address.Hex(), "size", len(batchData),
+							"timeout", batchAckTimeout, "unacked", remaining)
+						remaining = 0
+					}
 				}
-			} else {
-				// Not queued means no callback will ever run, so the WaitGroup
-				// counters must be released here or the goroutine above leaks.
-				for range batchCallbacks {
-					wg.Done()
-				}
+				// Release the timer promptly rather than leaving an armed 30s timer per
+				// batch (~2k live at 1500 tx/s).
+				timer.Stop()
 			}
 
 			if !queued {
@@ -696,14 +724,6 @@ const maxSenderWorkers = 2000
 // fires when something is genuinely wrong.
 const batchAckTimeout = 30 * time.Second
 
-// isNonceError reports whether a send was refused because the sender's nonce did
-// not match chain state — either ahead of it ("nonce too high", no predecessor to
-// follow) or behind it ("nonce too low", already consumed).
-//
-// Both are recoverable by resyncing from the chain, and both are FATAL to an
-// account if left alone on a chain with no mempool: Nitro will not hold a
-// transaction whose predecessor is missing, so every later nonce from that
-// account is refused too. See Account.MaybeResyncFromChain.
 // isNonceTooLow reports whether the sender's nonce was already consumed on chain.
 // Distinguished from the generic nonce error because the two need OPPOSITE
 // handling: a too-HIGH nonce was not consumed and must be rolled back for reuse,
@@ -717,6 +737,14 @@ func isNonceTooLow(err error) bool {
 		strings.Contains(s, "nonce has already been used")
 }
 
+// isNonceError reports whether a send was refused because the sender's nonce did
+// not match chain state — either ahead of it ("nonce too high", no predecessor to
+// follow) or behind it ("nonce too low", already consumed).
+//
+// Both are recoverable by resyncing from the chain, and both are FATAL to an
+// account if left alone on a chain with no mempool: Nitro will not hold a
+// transaction whose predecessor is missing, so every later nonce from that
+// account is refused too. See Account.MaybeResyncFromChain.
 func isNonceError(err error) bool {
 	if err == nil {
 		return false

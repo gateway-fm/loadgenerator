@@ -24,13 +24,19 @@ type Collector interface {
 	RecordTxConfirmed(txHash common.Hash, confirmTime time.Time)
 	RecordTxConfirmedFlowOnly(txHash common.Hash, confirmTime time.Time) // Flow tracking only (no counter/latency)
 	RecordTxFailed(category string)
+	// DiscardTx removes a transaction from send tracking without counting it as
+	// confirmed. Needed when a submission is accounted for as failed but its hash may
+	// still appear on chain: the confirmation scan gates on GetTxSentTime, so leaving
+	// the entry would let the same transaction be counted in BOTH txFailed and
+	// txConfirmed and decrement pendingCount twice.
+	DiscardTx(txHash common.Hash)
 
 	// Preconfirmation lifecycle (Flashblocks-compliant)
-	RecordPending(txHash common.Hash, pendingTime time.Time)       // TX queued by sequencer
-	RecordPreconfirmed(txHash common.Hash, preconfTime time.Time)  // TX selected for block
-	RecordRevoked(txHash common.Hash, revokedTime time.Time)       // Preconf broken
-	RecordDropped(txHash common.Hash, droppedTime time.Time)       // TX permanently dropped
-	RecordRequeued(txHash common.Hash, requeuedTime time.Time)     // TX requeued
+	RecordPending(txHash common.Hash, pendingTime time.Time)      // TX queued by sequencer
+	RecordPreconfirmed(txHash common.Hash, preconfTime time.Time) // TX selected for block
+	RecordRevoked(txHash common.Hash, revokedTime time.Time)      // Preconf broken
+	RecordDropped(txHash common.Hash, droppedTime time.Time)      // TX permanently dropped
+	RecordRequeued(txHash common.Hash, requeuedTime time.Time)    // TX requeued
 
 	// Realistic test metrics
 	RecordTip(tipWei *big.Int)
@@ -76,11 +82,11 @@ type Collector interface {
 // MemoryCollector is an in-memory implementation of Collector.
 type MemoryCollector struct {
 	// Transaction tracking
-	txTracker       *TxTracker
-	flowTracker     *TxFlowTracker // TX stage flow tracking
-	latencyStats    *StreamingLatencyStats
-	preconfLatency  *StreamingLatencyStats
-	pendingLatency  *StreamingLatencyStats
+	txTracker      *TxTracker
+	flowTracker    *TxFlowTracker // TX stage flow tracking
+	latencyStats   *StreamingLatencyStats
+	preconfLatency *StreamingLatencyStats
+	pendingLatency *StreamingLatencyStats
 
 	// Counters
 	txSent      uint64 // atomic
@@ -168,6 +174,12 @@ func (c *MemoryCollector) RecordTxFailed(category string) {
 	atomic.AddUint64(&c.txFailed, 1)
 	// Note: We don't have txHash here, so we can't track flow for failed TXs
 	// TODO: Track by category for error breakdown
+}
+
+// DiscardTx removes a transaction from send tracking without counting it as confirmed.
+// Idempotent, and a no-op for a hash that was never tracked.
+func (c *MemoryCollector) DiscardTx(txHash common.Hash) {
+	c.txTracker.GetAndDelete(txHash)
 }
 
 // RecordPending records when a transaction was acknowledged as pending by the sequencer.
