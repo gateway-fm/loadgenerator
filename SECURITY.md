@@ -24,9 +24,9 @@ Report privately through GitHub's private vulnerability reporting:
 3. Describe the issue and how to reproduce it.
 
 The report is visible only to the repository maintainers until an advisory is
-published. If you cannot use GitHub advisories, open a regular issue containing
-no technical detail — just ask a maintainer to make private contact — and we
-will take it from there.
+published.
+
+If you cannot use GitHub advisories, email **security@gateway.fm** instead.
 
 ### What to include
 
