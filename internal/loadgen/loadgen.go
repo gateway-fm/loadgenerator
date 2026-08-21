@@ -382,7 +382,10 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			// the chain and is entirely client-side. Raising the pool without
 			// raising this would reintroduce exactly that.
 			// (Was 8000 for a 2000 pool in PRST-4262, itself up from 2000.)
-			Concurrency: 16000, // Max concurrent in-flight sends
+			// senderConcurrency keeps the documented 4x-the-pool invariant when
+			// L2_MAX_SENDER_WORKERS moves the pool. Unset it is 4000*4 = 16000,
+			// exactly the previous literal.
+			Concurrency: senderConcurrency(cfg), // Max concurrent in-flight sends
 			Logger:      logger,
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/gateway-fm/loadgenerator/internal/account"
+	"github.com/gateway-fm/loadgenerator/internal/config"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
@@ -728,6 +729,33 @@ const nonceResyncInterval = 750 * time.Millisecond
 // Kept at sender concurrency / 4, so the semaphore still absorbs a full round of
 // concurrent batch sends -- concurrency is raised to 16000 alongside this.
 const maxSenderWorkers = 4000
+
+// senderWorkerPool returns the effective worker-pool size: cfg override when set,
+// otherwise the maxSenderWorkers default above.
+//
+// PRST-4459 made this overridable because the pool, not the chain and not the
+// proxy, is what bounds throughput on a no-mempool chain: workers are pinned
+// one-per-account and gated on their own account's ack, so aggregate is
+// `workers / ack_latency`. 4000 workers at the ~1.8s ack latency of an HTTPS edge
+// predicts 2,222 tx/s and 2,218 was measured -- while the edge sat at 16.79% of a
+// core and the sequencer closed blocks for lack of work. Raising the target rate
+// cannot beat this; only more workers or a shorter ack can.
+func senderWorkerPool(cfg *config.Config) int {
+	if cfg != nil && cfg.L2MaxSenderWorkers > 0 {
+		return cfg.L2MaxSenderWorkers
+	}
+	return maxSenderWorkers
+}
+
+// senderConcurrency returns the send semaphore size for a given pool.
+//
+// The invariant is 4x the pool and it is load-bearing: each worker holds one slot
+// per BATCH, so at 1x a single round of concurrent batches saturates the semaphore
+// and serialises sending -- which presents as a chain-side throughput ceiling and
+// is entirely client-side. Raising the pool without this would reintroduce it.
+func senderConcurrency(cfg *config.Config) int {
+	return senderWorkerPool(cfg) * 4
+}
 
 // batchAckTimeout bounds how long a worker waits for its in-flight batch to be
 // acknowledged before sending the next one for the same account. Generous

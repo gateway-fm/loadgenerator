@@ -53,6 +53,26 @@ type Config struct {
 	// useful work then cannot have.
 	L2ClientMaxRetries int
 
+	// L2MaxSenderWorkers overrides the sender goroutine pool. Zero keeps the
+	// built-in 4000.
+	//
+	// This is the throughput ceiling on a no-mempool chain, and the arithmetic is
+	// simple enough to be worth stating: each worker is pinned to ONE account and
+	// gated on that account's batch acknowledgement before it sends again, so
+	// aggregate throughput is bounded by `workers / ack_latency` regardless of how
+	// many accounts are funded or how high the target rate is set.
+	//
+	// Measured on Tickr's edge: 4000 workers at ~1.8 s ack latency gave 2,218
+	// tx/s on chain -- 4000/1.8 = 2,222, i.e. the cap explained the ceiling to
+	// within 0.2%, while the edge itself profiled at 16.79% of one core and the
+	// sequencer was closing blocks for lack of work.
+	//
+	// Raising it REQUIRES raising sender concurrency in step (the invariant is
+	// concurrency = 4x the pool; see loadgen.go), and requires that many funded
+	// accounts to exist -- a worker with no distinct account of its own just
+	// contends for one already in use.
+	L2MaxSenderWorkers int
+
 	// L2MaxConnsPerHost overrides the builder/L2 transport connection cap. Zero
 	// keeps the client default of 2000. See rpc.ClientConfig.MaxConnsPerHost for
 	// why this binds against a TLS edge and not against a plain-HTTP node.
@@ -236,6 +256,11 @@ func Load() (*Config, *CLIConfig, error) {
 	if v := os.Getenv("L2_CLIENT_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.L2ClientTimeout = d
+		}
+	}
+	if v := os.Getenv("L2_MAX_SENDER_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2MaxSenderWorkers = n
 		}
 	}
 	if v := os.Getenv("L2_MAX_CONNS_PER_HOST"); v != "" {

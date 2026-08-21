@@ -701,8 +701,8 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// Start sender workers
 	// More workers = better parallelism, but must not exceed semaphore capacity
 	numWorkers := len(allAccounts)
-	if numWorkers > maxSenderWorkers {
-		numWorkers = maxSenderWorkers // Cap workers (should be <= sender concurrency / 4)
+	if pool := senderWorkerPool(lg.cfg); numWorkers > pool {
+		numWorkers = pool // Cap workers (should be <= sender concurrency / 4)
 	}
 	if numWorkers > numAccounts {
 		numWorkers = numAccounts

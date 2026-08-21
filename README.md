@@ -537,6 +537,7 @@ func (cb *CircuitBreaker) onOpen() {
 | `L2_CLIENT_TIMEOUT` | (unset) | Per-request timeout on the builder/L2 HTTP clients, e.g. `30s`. Unset keeps the 2s default. Raise it when driving a proxy edge: once edge latency exceeds the timeout the client abandons requests the edge is still serving and retries them, manufacturing load. |
 | `L2_CLIENT_MAX_RETRIES` | (unset) | Retry count on those clients. Unset or `0` keeps the default of 3; pass `1` for a single attempt with no retry. Retries are re-counted by a per-key rate limiter that meters batch items. |
 | `L2_MAX_CONNS_PER_HOST` | (unset) | Connection cap on the builder/L2 transport. Unset keeps 2000. `MaxConnsPerHost` is a HARD cap — past it requests block waiting for a connection instead of opening one — so with one sender worker per account against a TLS edge it queues client-side, and a queued request only fails at the client timeout, by which point the per-account batch-ack window may have closed. |
+| `L2_MAX_SENDER_WORKERS` | (unset) | Sender goroutine pool. Unset keeps 4000. Each worker is pinned to ONE account and gated on that account's batch ack, so aggregate throughput is bounded by `workers / ack_latency` no matter how high the target rate is. Raising it scales sender concurrency in step (invariant: 4x the pool) and needs that many funded accounts to exist. |
 | `PRECONF_WS_URL` | ws://block-builder:3001/ws/preconfirmations | Preconfirmation WebSocket |
 | `LISTEN_ADDR` | :3001 | API listen address |
 | `DATABASE_PATH` | /data/loadgen.db | SQLite database |
