@@ -52,6 +52,12 @@ func (lg *LoadGenerator) setupReadLoad(req types.StartTestRequest) error {
 	clientCfg.Timeout = readClientTimeout
 	clientCfg.MaxRetries = readClientRetries
 	clientCfg.Logger = lg.logger
+	// Carry the bearer credential only when reads go to the same endpoint the
+	// writes do. A per-test ReadLoad.RPCURL can name any host — an archive node,
+	// a third party — and a credential must not follow the request there.
+	if url == lg.cfg.L2RPCURL {
+		clientCfg.AuthToken = l2AuthToken(lg.cfg, lg.logger)
+	}
 	readClient := rpc.NewHTTPClient(clientCfg)
 
 	lg.contractsMu.RLock()

@@ -42,6 +42,29 @@ func privacyURL(cfg *config.Config, logger *slog.Logger) string {
 	return url
 }
 
+// l2AuthToken reads the bearer credential for the builder and L2 clients from
+// cfg.L2AuthTokenFile, trimming the trailing newline a mounted secret file
+// carries. Returns "" when no file is configured or it cannot be read — an
+// unkeyed run must still start, and the failure then shows up as the edge's
+// anonymous rate limit rather than as a crash, so the warning is the signal.
+func l2AuthToken(cfg *config.Config, logger *slog.Logger) string {
+	if cfg.L2AuthTokenFile == "" {
+		return ""
+	}
+	b, err := os.ReadFile(cfg.L2AuthTokenFile)
+	if err != nil {
+		logger.Warn("could not read L2 auth token file; sending no Authorization header",
+			"path", cfg.L2AuthTokenFile, "error", err)
+		return ""
+	}
+	token := strings.TrimSpace(string(b))
+	if token == "" {
+		logger.Warn("L2 auth token file is empty; sending no Authorization header",
+			"path", cfg.L2AuthTokenFile)
+	}
+	return token
+}
+
 // buildPrivacyClient builds a privacy-proxy-routed RPC client: routes to
 // privacyURL(cfg), attaches the Bearer token from PrivacyAuthTokenFile, and
 // wraps it in a NoBatch client (the proxy rejects JSON-RPC batches). Returns the

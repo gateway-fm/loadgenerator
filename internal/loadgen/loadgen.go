@@ -315,12 +315,21 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			logger.Warn("privacy route-all client deferred until test start (auth token not available yet)", "error", err)
 		}
 	}
+	// Bearer credential for the builder/L2 endpoints, e.g. a Gateway RPC API key
+	// on a rate-limited proxy edge. Empty when unconfigured, and the client then
+	// sends no Authorization header at all.
+	authToken := l2AuthToken(cfg, logger)
+	if authToken != "" {
+		logger.Info("L2/builder RPC clients will send an Authorization header",
+			"tokenFile", cfg.L2AuthTokenFile)
+	}
 	if lg.builderClient == nil {
 		if routeAllClient != nil {
 			lg.builderClient = routeAllClient
 		} else {
 			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
 			builderCfg.Logger = logger
+			builderCfg.AuthToken = authToken
 			lg.builderClient = rpc.NewHTTPClient(builderCfg)
 		}
 	}
@@ -330,6 +339,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		} else {
 			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
 			l2Cfg.Logger = logger
+			l2Cfg.AuthToken = authToken
 			lg.l2Client = rpc.NewHTTPClient(l2Cfg)
 		}
 	}

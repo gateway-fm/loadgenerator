@@ -30,6 +30,13 @@ type Config struct {
 	BlockTimeMS        int    // Block time in milliseconds (for account scaling)
 	CORSAllowedOrigins string // Comma-separated list of allowed origins, or "*" for all (default: "*")
 
+	// L2AuthTokenFile is a path to a file holding a bearer credential to send as
+	// "Authorization: Bearer <token>" on the builder and L2 HTTP clients. A file
+	// rather than a plain value so the credential does not appear in the process
+	// environment (kubectl describe pod, docker inspect, set -x). Empty means no
+	// header is sent, so unkeyed runs are byte-identical to before.
+	L2AuthTokenFile string
+
 	PrivacyRPCURL        string // Privacy proxy RPC URL (optional)
 	PrivacyAuthTokenFile string // Path to file containing JWT Bearer token
 	PrivacyOrgIDFile     string // Path to file with the org UUID to route through (/rpc/{org}); for multi-org users
@@ -194,6 +201,9 @@ func Load() (*Config, *CLIConfig, error) {
 		if fee, err := parseInt64Env(v); err == nil && fee >= 0 {
 			cfg.GasFeeCap = fee
 		}
+	}
+	if v := os.Getenv("L2_AUTH_TOKEN_FILE"); v != "" {
+		cfg.L2AuthTokenFile = v
 	}
 	if v := os.Getenv("PRIVACY_RPC_URL"); v != "" {
 		cfg.PrivacyRPCURL = v

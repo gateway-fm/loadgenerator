@@ -224,6 +224,7 @@ queued := sender.SendAsync(ctx, txData, func(err error) {
 | `BUILDER_RPC_URL` | http://block-builder:3000 | Transaction submission endpoint |
 | `L2_RPC_URL` | http://block-builder:3000 | L2 node for confirmations |
 | `L2_WS_URL` | ws://l2-reth:8546 | L2 WebSocket for block metrics |
+| `L2_AUTH_TOKEN_FILE` | (unset) | Path to a file holding a bearer credential sent as `Authorization: Bearer <token>` on the builder/L2 HTTP clients — e.g. a Gateway RPC API key for a rate-limited proxy edge. A file, not a value, so the credential stays out of the process environment. Unset means no header is sent. |
 | `PRECONF_WS_URL` | ws://block-builder:3001/ws/preconfirmations | Preconfirmation WebSocket |
 | `LISTEN_ADDR` | :3001 | API listen address |
 | `DATABASE_PATH` | /data/loadgen.db | SQLite database path |
