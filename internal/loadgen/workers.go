@@ -714,9 +714,20 @@ const nonceResyncInterval = 750 * time.Millisecond
 // that batch and the account needs a resync to recover. Spreading the same rate
 // over 2000 accounts cuts per-account velocity 4x and makes drift far less likely.
 //
-// Kept at sender concurrency / 4 as before (concurrency is 8000), so the
-// semaphore still absorbs a full round of concurrent batch sends.
-const maxSenderWorkers = 2000
+// Raised again to 4000 for PRST-4453, for the same reason and one rung further
+// up the rate ladder. 2000 accounts is enough up to ~1500 tx/s, but a 3,000 tx/s
+// arm puts each account at 1.5 tx/s and PRST-4367 measured that as a PERSISTENT
+// ~1.4% send-failure drizzle that never clears -- not a transient. Spreading the
+// same 3,000 tx/s over 4000 accounts halves per-account velocity to 0.75 tx/s,
+// which took the identical arm to 3 failures in 2,699,771 sends (0.0001%).
+//
+// PRST-4367 made this change locally and never pushed it, so the fix was carried
+// only by an image tag; it is committed here so the next campaign does not have
+// to rediscover it.
+//
+// Kept at sender concurrency / 4, so the semaphore still absorbs a full round of
+// concurrent batch sends -- concurrency is raised to 16000 alongside this.
+const maxSenderWorkers = 4000
 
 // batchAckTimeout bounds how long a worker waits for its in-flight batch to be
 // acknowledged before sending the next one for the same account. Generous
