@@ -65,6 +65,24 @@ func l2AuthToken(cfg *config.Config, logger *slog.Logger) string {
 	return token
 }
 
+// applyL2ClientTuning applies the optional timeout / retry overrides to a client
+// config. Both are no-ops when unset, so an unconfigured run keeps
+// DefaultClientConfig's 2s and 3 retries exactly.
+//
+// These matter through a proxy edge and not much anywhere else. A 2s timeout
+// against an edge whose p50 is several seconds means the client abandons requests
+// the edge is still serving, then retries them -- so the transaction lands and is
+// re-sent, and a per-key limiter that counts batch ITEMS charges for both. That
+// is load the client manufactures for itself.
+func applyL2ClientTuning(cfg *config.Config, ccfg *rpc.ClientConfig) {
+	if cfg.L2ClientTimeout > 0 {
+		ccfg.Timeout = cfg.L2ClientTimeout
+	}
+	if cfg.L2ClientMaxRetries > 0 {
+		ccfg.MaxRetries = cfg.L2ClientMaxRetries
+	}
+}
+
 // buildPrivacyClient builds a privacy-proxy-routed RPC client: routes to
 // privacyURL(cfg), attaches the Bearer token from PrivacyAuthTokenFile, and
 // wraps it in a NoBatch client (the proxy rejects JSON-RPC batches). Returns the

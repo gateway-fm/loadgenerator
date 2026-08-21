@@ -30,6 +30,29 @@ type Config struct {
 	BlockTimeMS        int    // Block time in milliseconds (for account scaling)
 	CORSAllowedOrigins string // Comma-separated list of allowed origins, or "*" for all (default: "*")
 
+	// L2ClientTimeout overrides the per-request timeout on the builder and L2
+	// HTTP clients. Zero means keep DefaultClientConfig's 2s.
+	//
+	// 2s is right against a local node and actively harmful through a proxy edge:
+	// once edge p50 exceeds the timeout, the client abandons requests the edge is
+	// still serving and retries them, so the transaction lands AND is re-sent.
+	// Measured on Tickr's edge (PRST-4459): ~2 successful send requests per landed
+	// transaction, plus enough retry traffic to consume the API key's whole
+	// per-second quota. Raising this trades tail latency for not manufacturing
+	// load.
+	L2ClientTimeout time.Duration
+
+	// L2ClientMaxRetries overrides the retry count on those clients.
+	//
+	// ZERO MEANS "KEEP THE DEFAULT" (3), not "no retries" -- deliberately, because
+	// this is the zero value of the field and an unset config must not silently
+	// change send behaviour. Pass 1 for a single attempt with no retry.
+	//
+	// Retries are a client-side amplifier: each one is counted again by a per-key
+	// rate limiter that meters batch ITEMS, so a retry storm spends quota that
+	// useful work then cannot have.
+	L2ClientMaxRetries int
+
 	// L2AuthTokenFile is a path to a file holding a bearer credential to send as
 	// "Authorization: Bearer <token>" on the builder and L2 HTTP clients. A file
 	// rather than a plain value so the credential does not appear in the process
@@ -204,6 +227,16 @@ func Load() (*Config, *CLIConfig, error) {
 	}
 	if v := os.Getenv("L2_AUTH_TOKEN_FILE"); v != "" {
 		cfg.L2AuthTokenFile = v
+	}
+	if v := os.Getenv("L2_CLIENT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.L2ClientTimeout = d
+		}
+	}
+	if v := os.Getenv("L2_CLIENT_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2ClientMaxRetries = n
+		}
 	}
 	if v := os.Getenv("PRIVACY_RPC_URL"); v != "" {
 		cfg.PrivacyRPCURL = v

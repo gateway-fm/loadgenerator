@@ -323,6 +323,10 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		logger.Info("L2/builder RPC clients will send an Authorization header",
 			"tokenFile", cfg.L2AuthTokenFile)
 	}
+	if cfg.L2ClientTimeout > 0 || cfg.L2ClientMaxRetries > 0 {
+		logger.Info("L2/builder RPC client tuning applied",
+			"timeout", cfg.L2ClientTimeout, "maxRetries", cfg.L2ClientMaxRetries)
+	}
 	if lg.builderClient == nil {
 		if routeAllClient != nil {
 			lg.builderClient = routeAllClient
@@ -330,6 +334,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
 			builderCfg.Logger = logger
 			builderCfg.AuthToken = authToken
+			applyL2ClientTuning(cfg, &builderCfg)
 			lg.builderClient = rpc.NewHTTPClient(builderCfg)
 		}
 	}
@@ -340,6 +345,7 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
 			l2Cfg.Logger = logger
 			l2Cfg.AuthToken = authToken
+			applyL2ClientTuning(cfg, &l2Cfg)
 			lg.l2Client = rpc.NewHTTPClient(l2Cfg)
 		}
 	}
