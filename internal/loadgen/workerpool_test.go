@@ -40,3 +40,28 @@ func TestSenderWorkerPool(t *testing.T) {
 		})
 	}
 }
+
+// Depth 1 is strict per-account serialisation and MUST stay the default: on a
+// chain with no mempool a nonce arriving early is refused, not queued, so any
+// value above 1 is opt-in and depends on the chain parking too-high nonces.
+func TestPipelineBatchDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  *config.Config
+		want int
+	}{
+		{name: "nil config", cfg: nil, want: 1},
+		{name: "unset", cfg: &config.Config{}, want: 1},
+		{name: "zero", cfg: &config.Config{L2PipelineBatchDepth: 0}, want: 1},
+		{name: "one", cfg: &config.Config{L2PipelineBatchDepth: 1}, want: 1},
+		{name: "negative clamps to serial", cfg: &config.Config{L2PipelineBatchDepth: -3}, want: 1},
+		{name: "two", cfg: &config.Config{L2PipelineBatchDepth: 2}, want: 2},
+		{name: "four", cfg: &config.Config{L2PipelineBatchDepth: 4}, want: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pipelineBatchDepth(tt.cfg); got != tt.want {
+				t.Errorf("pipelineBatchDepth() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

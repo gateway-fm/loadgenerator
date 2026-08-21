@@ -61,6 +61,12 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 	// With a linger timeout, partial batches flush quickly, spreading load evenly.
 	const batchSize = 20
 	const maxBatchLinger = 100 * time.Millisecond
+	// One permit per allowed in-flight batch FOR THIS ACCOUNT. nil and unused at
+	// depth 1, which is the default.
+	var batchPermits chan struct{}
+	if d := pipelineBatchDepth(lg.cfg); d > 1 {
+		batchPermits = make(chan struct{}, d)
+	}
 	batchData := make([][]byte, 0, batchSize)
 	batchCallbacks := make([]func(error), 0, batchSize)
 	// We need to track nonces to rollback on failure
@@ -338,8 +344,11 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				}
 			}
 
-			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, gated)
-			if queued {
+			// awaitAcks drains this batch's acknowledgements with a bounded wait.
+			// Extracted so it can run either inline (depth 1, the historical
+			// behaviour) or in a goroutine that releases a pipeline permit
+			// (depth > 1). Identical semantics either way.
+			awaitAcks := func(want int) {
 				// BOUNDED wait. Waiting unconditionally would wedge the worker for good
 				// if callbacks never fire — which a Sender implementation is not
 				// contractually obliged to guarantee, and which test doubles in
@@ -348,7 +357,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				// ordering for one batch costs a resync, whereas a wedged worker costs
 				// the whole account for the rest of the run.
 				timer := time.NewTimer(batchAckTimeout)
-				for remaining := len(gated); remaining > 0; {
+				for remaining := want; remaining > 0; {
 					select {
 					case <-acks:
 						remaining--
@@ -359,7 +368,7 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 						// "this run is valid" and "this account contributed nothing for
 						// 30 seconds", and Debug is off in a normal run.
 						lg.logger.Warn("batch ack timed out; continuing without ordering guarantee",
-							"account", acc.Address.Hex(), "size", len(batchData),
+							"account", acc.Address.Hex(), "size", want,
 							"timeout", batchAckTimeout, "unacked", remaining)
 						remaining = 0
 					}
@@ -367,6 +376,40 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				// Release the timer promptly rather than leaving an armed 30s timer per
 				// batch (~2k live at 1500 tx/s).
 				timer.Stop()
+			}
+
+			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, gated)
+
+			// PIPELINE DEPTH. At depth 1 -- the default and the historical
+			// behaviour -- the worker blocks here until this batch is fully
+			// acknowledged, so exactly one batch per account is ever in flight and
+			// consecutive nonces cannot race each other.
+			//
+			// Above 1, the wait moves to a goroutine holding a permit, so up to N
+			// batches per account are in flight. That is safe ONLY because nitro
+			// keeps a nonce-failure cache which parks a too-high nonce and retries
+			// it instead of dropping it: measured on Tickr at
+			// `arb_sequencer_noncefailurecache_size` 0 of 65536 with
+			// `_overflow` 0, i.e. entirely unused. Depth N puts at most
+			// N-1 extra batches per account into that cache.
+			//
+			// WATCH `arb_sequencer_noncefailurecache_overflow` ON ANY RUN WITH
+			// DEPTH > 1. Non-zero means the cache dropped a nonce, the account
+			// needs a resync, and the arm's numbers are not trustworthy.
+			if pipelineBatchDepth(lg.cfg) > 1 {
+				if queued {
+					want := len(gated)
+					select {
+					case batchPermits <- struct{}{}:
+						go func() {
+							awaitAcks(want)
+							<-batchPermits
+						}()
+					case <-lg.ctx.Done():
+					}
+				}
+			} else if queued {
+				awaitAcks(len(gated))
 			}
 
 			if !queued {
@@ -762,6 +805,25 @@ func senderConcurrency(cfg *config.Config) int {
 // relative to a normal submit (sub-millisecond to low tens of ms) so it only
 // fires when something is genuinely wrong.
 const batchAckTimeout = 30 * time.Second
+
+// pipelineBatchDepth returns how many batches may be in flight per account.
+//
+// 1 (the default) is strict serialisation: the worker waits for every ack before
+// building the next batch, so consecutive nonces for one account can never race.
+// That is the right default on a chain with no mempool, where a nonce arriving
+// early is refused rather than queued.
+//
+// Above 1 it relies on nitro's nonce-failure cache to park a too-high nonce and
+// retry it. On Tickr that cache measured 0 of 65536 entries used with zero
+// overflow, so there is real headroom -- but `arb_sequencer_noncefailurecache_overflow`
+// must be watched on any run above 1, because a non-zero value means a nonce was
+// dropped, the account needs a resync, and the arm is not trustworthy.
+func pipelineBatchDepth(cfg *config.Config) int {
+	if cfg != nil && cfg.L2PipelineBatchDepth > 1 {
+		return cfg.L2PipelineBatchDepth
+	}
+	return 1
+}
 
 // isNonceTooLow reports whether the sender's nonce was already consumed on chain.
 // Distinguished from the generic nonce error because the two need OPPOSITE

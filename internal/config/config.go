@@ -78,6 +78,16 @@ type Config struct {
 	// why this binds against a TLS edge and not against a plain-HTTP node.
 	L2MaxConnsPerHost int
 
+	// L2PipelineBatchDepth is how many batches may be in flight per sender
+	// account. Default 1 = strict serialisation, the historical behaviour.
+	//
+	// This is the ONLY remaining lever on a latency-bound path: throughput is
+	// `accounts x depth x batch / round_trip`, and unlike adding workers or
+	// connections, depth does not inflate the round trip -- it overlaps waits that
+	// were previously serial. Above 1 it depends on the chain parking too-high
+	// nonces rather than refusing them; see pipelineBatchDepth.
+	L2PipelineBatchDepth int
+
 	// L2ForceHTTP2 enables HTTP/2 on the builder/L2 transport. Default false.
 	// Multiplexes concurrent requests as streams over one connection, so
 	// concurrency stops costing TLS handshakes and stops queueing behind the
@@ -262,6 +272,11 @@ func Load() (*Config, *CLIConfig, error) {
 	if v := os.Getenv("L2_CLIENT_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.L2ClientTimeout = d
+		}
+	}
+	if v := os.Getenv("L2_PIPELINE_BATCH_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 1 {
+			cfg.L2PipelineBatchDepth = n
 		}
 	}
 	if v := os.Getenv("L2_FORCE_HTTP2"); v == "true" || v == "1" {
