@@ -1,0 +1,26 @@
+# Code owners for gateway-fm/loadgenerator
+#
+# Owners listed here are requested for review automatically on any pull request
+# touching a matching path. The last matching pattern wins. Every owner must
+# have write access to this repository or the entry is silently ignored.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo.
+*                       @IvanBelyakoff @polskikh
+
+# Public API surface — changes here break downstream consumers
+# (the GasStorm dashboard and any external client).
+/api/                   @IvanBelyakoff @polskikh
+/pkg/types/             @IvanBelyakoff @polskikh
+
+# Build, CI and release pipeline.
+/.github/workflows/     @IvanBelyakoff @polskikh
+/Dockerfile             @IvanBelyakoff @polskikh
+/Makefile               @IvanBelyakoff @polskikh
+
+# Licensing and project governance.
+/LICENSE                @IvanBelyakoff @polskikh
+/NOTICE                 @IvanBelyakoff @polskikh
+/SECURITY.md            @IvanBelyakoff @polskikh
+/CODE_OF_CONDUCT.md     @IvanBelyakoff @polskikh
+/.github/CODEOWNERS     @IvanBelyakoff @polskikh
