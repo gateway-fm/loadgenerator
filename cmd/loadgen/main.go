@@ -128,6 +128,7 @@ func main() {
 		L2ClientMaxRetries:   envPositiveInt("L2_CLIENT_MAX_RETRIES"),
 		L2MaxConnsPerHost:    envPositiveInt("L2_MAX_CONNS_PER_HOST"),
 		L2MaxSenderWorkers:   envPositiveInt("L2_MAX_SENDER_WORKERS"),
+		L2ForceHTTP2:         os.Getenv("L2_FORCE_HTTP2") == "true" || os.Getenv("L2_FORCE_HTTP2") == "1",
 		PrivacyRPCURL:        os.Getenv("PRIVACY_RPC_URL"),
 		PrivacyAuthTokenFile: os.Getenv("PRIVACY_AUTH_TOKEN_FILE"),
 		PrivacyOrgIDFile:     os.Getenv("PRIVACY_ORG_ID_FILE"),

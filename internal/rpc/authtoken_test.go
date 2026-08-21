@@ -123,3 +123,33 @@ func TestClientConfigMaxConnsPerHost(t *testing.T) {
 		})
 	}
 }
+
+// HTTP/2 must stay OFF by default -- it changes the wire protocol against every
+// existing endpoint, and every figure published from this generator so far was
+// measured over HTTP/1.1.
+func TestClientConfigForceHTTP2(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		set  bool
+	}{{name: "default off", set: false}, {name: "enabled", set: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultClientConfig("https://example.invalid")
+			cfg.ForceHTTP2 = tt.set
+			c := NewHTTPClient(cfg)
+
+			tr, ok := c.httpClient.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport is %T", c.httpClient.Transport)
+			}
+			if tr.ForceAttemptHTTP2 != tt.set {
+				t.Errorf("ForceAttemptHTTP2 = %v, want %v", tr.ForceAttemptHTTP2, tt.set)
+			}
+		})
+	}
+
+	// The zero value of ClientConfig must not enable it.
+	if NewHTTPClient(DefaultClientConfig("https://example.invalid")).
+		httpClient.Transport.(*http.Transport).ForceAttemptHTTP2 {
+		t.Error("DefaultClientConfig must leave HTTP/2 disabled")
+	}
+}

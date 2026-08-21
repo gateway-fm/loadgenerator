@@ -186,6 +186,26 @@ type ClientConfig struct {
 	// Measured on Tickr's edge: continuous batch-ack timeouts against an edge
 	// profiled at 16.79% of one core -- i.e. the queue was ours, not the server's.
 	MaxConnsPerHost int
+
+	// ForceHTTP2 enables HTTP/2 on the builder/L2 transport. Default false, which
+	// is what this client has always done.
+	//
+	// It matters only against a TLS endpoint, and it attacks the one thing that
+	// has been shown to move throughput on a proxy edge: LATENCY, not
+	// parallelism. Over HTTP/1.1 every concurrent request needs its own
+	// connection, so N in-flight requests cost N TLS handshakes and queue behind
+	// MaxConnsPerHost once it is reached. HTTP/2 multiplexes them as streams over
+	// ONE connection, so concurrency stops costing handshakes and stops queueing.
+	//
+	// Measured on Tickr's edge (PRST-4459): adding parallelism anywhere -- proxy
+	// CPU, connection cap, funded accounts, sender workers -- did not raise
+	// throughput, because ack latency rose in proportion. Only changes that
+	// REMOVED latency did. HTTP/2 is the remaining one of those on the client.
+	//
+	// Requires the server to negotiate h2 over ALPN. If it does not, Go silently
+	// stays on HTTP/1.1, so this is safe to enable speculatively -- but verify
+	// which protocol was actually used before crediting it with a result.
+	ForceHTTP2 bool
 }
 
 // DefaultClientConfig returns default configuration.
@@ -227,7 +247,7 @@ func NewHTTPClient(cfg ClientConfig) *HTTPClient {
 		MaxConnsPerHost:     maxConns,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
-		ForceAttemptHTTP2:   false,
+		ForceAttemptHTTP2:   cfg.ForceHTTP2,
 	}
 
 	logger := cfg.Logger

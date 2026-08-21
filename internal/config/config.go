@@ -78,6 +78,12 @@ type Config struct {
 	// why this binds against a TLS edge and not against a plain-HTTP node.
 	L2MaxConnsPerHost int
 
+	// L2ForceHTTP2 enables HTTP/2 on the builder/L2 transport. Default false.
+	// Multiplexes concurrent requests as streams over one connection, so
+	// concurrency stops costing TLS handshakes and stops queueing behind the
+	// connection cap. See rpc.ClientConfig.ForceHTTP2.
+	L2ForceHTTP2 bool
+
 	// L2AuthTokenFile is a path to a file holding a bearer credential to send as
 	// "Authorization: Bearer <token>" on the builder and L2 HTTP clients. A file
 	// rather than a plain value so the credential does not appear in the process
@@ -257,6 +263,9 @@ func Load() (*Config, *CLIConfig, error) {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.L2ClientTimeout = d
 		}
+	}
+	if v := os.Getenv("L2_FORCE_HTTP2"); v == "true" || v == "1" {
+		cfg.L2ForceHTTP2 = true
 	}
 	if v := os.Getenv("L2_MAX_SENDER_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
