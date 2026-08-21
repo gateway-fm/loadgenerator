@@ -126,6 +126,7 @@ func main() {
 		L2AuthTokenFile:      os.Getenv("L2_AUTH_TOKEN_FILE"),
 		L2ClientTimeout:      envDuration("L2_CLIENT_TIMEOUT"),
 		L2ClientMaxRetries:   envPositiveInt("L2_CLIENT_MAX_RETRIES"),
+		L2MaxConnsPerHost:    envPositiveInt("L2_MAX_CONNS_PER_HOST"),
 		PrivacyRPCURL:        os.Getenv("PRIVACY_RPC_URL"),
 		PrivacyAuthTokenFile: os.Getenv("PRIVACY_AUTH_TOKEN_FILE"),
 		PrivacyOrgIDFile:     os.Getenv("PRIVACY_ORG_ID_FILE"),

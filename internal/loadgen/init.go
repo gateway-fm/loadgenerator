@@ -81,6 +81,9 @@ func applyL2ClientTuning(cfg *config.Config, ccfg *rpc.ClientConfig) {
 	if cfg.L2ClientMaxRetries > 0 {
 		ccfg.MaxRetries = cfg.L2ClientMaxRetries
 	}
+	if cfg.L2MaxConnsPerHost > 0 {
+		ccfg.MaxConnsPerHost = cfg.L2MaxConnsPerHost
+	}
 }
 
 // buildPrivacyClient builds a privacy-proxy-routed RPC client: routes to

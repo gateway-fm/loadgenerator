@@ -53,6 +53,11 @@ type Config struct {
 	// useful work then cannot have.
 	L2ClientMaxRetries int
 
+	// L2MaxConnsPerHost overrides the builder/L2 transport connection cap. Zero
+	// keeps the client default of 2000. See rpc.ClientConfig.MaxConnsPerHost for
+	// why this binds against a TLS edge and not against a plain-HTTP node.
+	L2MaxConnsPerHost int
+
 	// L2AuthTokenFile is a path to a file holding a bearer credential to send as
 	// "Authorization: Bearer <token>" on the builder and L2 HTTP clients. A file
 	// rather than a plain value so the credential does not appear in the process
@@ -231,6 +236,11 @@ func Load() (*Config, *CLIConfig, error) {
 	if v := os.Getenv("L2_CLIENT_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.L2ClientTimeout = d
+		}
+	}
+	if v := os.Getenv("L2_MAX_CONNS_PER_HOST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2MaxConnsPerHost = n
 		}
 	}
 	if v := os.Getenv("L2_CLIENT_MAX_RETRIES"); v != "" {

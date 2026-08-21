@@ -85,3 +85,41 @@ func TestHTTPClientAuthorizationHeader(t *testing.T) {
 		}
 	}
 }
+
+// MaxConnsPerHost is a HARD cap in net/http: past it, requests block waiting for
+// a connection rather than opening one. Against a TLS edge with one sender worker
+// per account that queue is where stalls come from, so it has to be raisable --
+// and unset has to keep the historical 2000 so existing runs are unchanged.
+func TestClientConfigMaxConnsPerHost(t *testing.T) {
+	tests := []struct {
+		name string
+		set  int
+		want int
+	}{
+		{name: "unset keeps default", set: 0, want: 2000},
+		{name: "negative keeps default", set: -1, want: 2000},
+		{name: "raised", set: 8000, want: 8000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultClientConfig("http://example.invalid")
+			cfg.MaxConnsPerHost = tt.set
+			c := NewHTTPClient(cfg)
+
+			tr, ok := c.httpClient.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport is %T, want *http.Transport", c.httpClient.Transport)
+			}
+			if tr.MaxConnsPerHost != tt.want {
+				t.Errorf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, tt.want)
+			}
+			// The idle pool must never be smaller than the hard cap, or
+			// established connections get closed and re-dialled, re-paying the
+			// TLS handshake each time.
+			if tr.MaxIdleConnsPerHost < tr.MaxConnsPerHost {
+				t.Errorf("MaxIdleConnsPerHost %d < MaxConnsPerHost %d", tr.MaxIdleConnsPerHost, tr.MaxConnsPerHost)
+			}
+		})
+	}
+}
