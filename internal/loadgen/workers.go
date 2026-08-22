@@ -791,6 +791,43 @@ const nonceResyncInterval = 750 * time.Millisecond
 //
 // Kept at sender concurrency / 4, so the semaphore still absorbs a full round of
 // concurrent batch sends -- concurrency is raised to 16000 alongside this.
+//
+// BUT THIS DEFAULT IS WRONG FOR A HIGH-LATENCY PATH, AND BY A LOT. Everything
+// above argues for MORE accounts, to cut per-account nonce velocity. There is an
+// opposing force that only shows up once a slow hop is in front of the chain, and
+// on Tickr through its public proxy edge it dominates (PRST-4459, measured
+// 2026-08-22):
+//
+// A worker holds ONE batch in flight and blocks on its ack, so in-flight work is
+// `workers x batchSize` and ack latency is that divided by the throughput the
+// path can actually serve. At 4000 workers into a path serving ~3,000 tx/s that
+// is 80,000 transactions in flight and an ack latency near 27 s -- against a
+// batchAckTimeout of 30 s. The result is not a slowdown but a collapse: 4,512
+// batches timed out in a 300 s arm, 53.6% of all submissions were refused, and
+// two stretches of 56 s and 9 s produced zero transactions.
+//
+// Lowering the pool to 300 on the identical rig, changing nothing else, gave
+// 2,913.8 tx/s against 2,054.8 (+41.8%), ZERO failed submissions out of 528,392,
+// and no outages. So on this path lower is strictly better, and it does not cost
+// the stability the paragraphs above bought: per-account velocity at 300 accounts
+// is ~10 tx/s, far above the 0.75 tx/s PRST-4367 aimed for, and the failure rate
+// was still zero. The reason is that nitro's eth_sendRawTransaction does not
+// return until the transaction is sequenced and a JSON-RPC batch is served
+// serially, so each account's nonces cannot overtake each other regardless of
+// velocity -- the strict one-batch-per-account serialisation below is what makes
+// that safe.
+//
+// The corollary is the useful part: throughput is
+// `concurrently-submitting accounts x block rate`, because each account lands one
+// transaction per block. 300 workers x ~9.85 blocks/s = ~2,955 tx/s, measured
+// 2,899-2,914. Raising the pool raises the CEILING (600 workers reached 601
+// transactions per block and 3,729 tx/s peaks) but past ~300 the average stops
+// improving and the edge starts refusing -- 3.3% at 600 through the proxy, 0%
+// direct to the sequencer.
+//
+// So: tune this per path rather than trusting the default. Size it as
+// `target_tx_per_s / block_rate` and check ack latency stays well inside
+// L2_BATCH_ACK_TIMEOUT. Do not raise it to chase throughput.
 const maxSenderWorkers = 4000
 
 // senderWorkerPool returns the effective worker-pool size: cfg override when set,
