@@ -224,6 +224,7 @@ queued := sender.SendAsync(ctx, txData, func(err error) {
 | `BUILDER_RPC_URL` | http://block-builder:3000 | Transaction submission endpoint |
 | `L2_RPC_URL` | http://block-builder:3000 | L2 node for confirmations |
 | `L2_WS_URL` | ws://l2-reth:8546 | L2 WebSocket for block metrics |
+| `L2_BATCH_ACK_TIMEOUT` | `30s` | How long a sender worker waits for its in-flight batch to be acked before giving up on it. A worker is pinned to ONE account and blocks here for the whole timeout, so at the 30s default one slow ack costs that account 30 seconds -- and timeouts arrive in synchronised waves, so the aggregate effect is a stall, not a slowdown. On giving up the worker now **resyncs the account's nonce from chain** instead of continuing without ordering: on a chain with no mempool a mismatched nonce is refused, not queued, so a blind next batch is guaranteed to fail and so is every batch after it. Measured on Tickr through a proxy edge (PRST-4459): 4,512 timeouts in a 300s arm, 53.6% of submissions refused, and two dead stretches of 56s and 9s. Must be positive; unparseable or non-positive values fail at startup rather than becoming a zero timer that fires instantly. |
 | `PRECONF_WS_URL` | ws://block-builder:3001/ws/preconfirmations | Preconfirmation WebSocket |
 | `LISTEN_ADDR` | :3001 | API listen address |
 | `DATABASE_PATH` | /data/loadgen.db | SQLite database path |

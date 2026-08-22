@@ -11,6 +11,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/gateway-fm/loadgenerator/internal/account"
+	"github.com/gateway-fm/loadgenerator/internal/config"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
@@ -346,7 +347,8 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				// shutdown or after a generous timeout and carry on: losing per-account
 				// ordering for one batch costs a resync, whereas a wedged worker costs
 				// the whole account for the rest of the run.
-				timer := time.NewTimer(batchAckTimeout)
+				ackTimeout := batchAckTimeoutFor(lg.cfg)
+				timer := time.NewTimer(ackTimeout)
 				for remaining := len(gated); remaining > 0; {
 					select {
 					case <-acks:
@@ -356,14 +358,33 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 					case <-timer.C:
 						// Warn, not Debug: a stalled batch is the difference between
 						// "this run is valid" and "this account contributed nothing for
-						// 30 seconds", and Debug is off in a normal run.
-						lg.logger.Warn("batch ack timed out; continuing without ordering guarantee",
+						// the whole timeout", and Debug is off in a normal run.
+						lg.logger.Warn("batch ack timed out; resyncing account nonce",
 							"account", acc.Address.Hex(), "size", len(batchData),
-							"timeout", batchAckTimeout, "unacked", remaining)
+							"timeout", ackTimeout, "unacked", remaining)
+						// RESYNC RATHER THAN CARRY ON BLIND. The unacked sends may or may
+						// not have landed, so this account's local counter is now of
+						// unknown accuracy — and on a chain with no mempool (Nitro) a
+						// nonce that does not match state is REFUSED, not queued, so the
+						// next batch built from a wrong counter is guaranteed to fail and
+						// so is every batch after it. Carrying on without ordering is what
+						// turned 4,512 ack timeouts into 53.6% refused submissions on
+						// Tickr (PRST-4459).
+						//
+						// MaybeResyncFromChain is the rate-limited variant on purpose:
+						// timeouts arrive in synchronised waves across thousands of
+						// accounts, and the unthrottled resync would stampede the same
+						// endpoint that is already too slow to ack. It also only ever
+						// moves the counter FORWARD and keeps still-reusable free nonces,
+						// so a lagging read cannot strand the account.
+						if _, rErr := acc.MaybeResyncFromChain(lg.ctx, lg.l2Client, nonceResyncInterval); rErr != nil {
+							lg.logger.Debug("nonce resync after ack timeout failed",
+								"account", acc.Address.Hex(), "err", rErr)
+						}
 						remaining = 0
 					}
 				}
-				// Release the timer promptly rather than leaving an armed 30s timer per
+				// Release the timer promptly rather than leaving an armed timer per
 				// batch (~2k live at 1500 tx/s).
 				timer.Stop()
 			}
@@ -729,11 +750,29 @@ const nonceResyncInterval = 750 * time.Millisecond
 // concurrent batch sends -- concurrency is raised to 16000 alongside this.
 const maxSenderWorkers = 4000
 
-// batchAckTimeout bounds how long a worker waits for its in-flight batch to be
-// acknowledged before sending the next one for the same account. Generous
+// defaultBatchAckTimeout bounds how long a worker waits for its in-flight batch
+// to be acknowledged before sending the next one for the same account. Generous
 // relative to a normal submit (sub-millisecond to low tens of ms) so it only
 // fires when something is genuinely wrong.
-const batchAckTimeout = 30 * time.Second
+//
+// It is GENEROUS TO A FAULT against a rate-limited proxy edge, which is why it is
+// now overridable. A worker is pinned to one account and blocks here for the whole
+// timeout, so the cost of one slow ack is that account contributing nothing for
+// 30 seconds — and because timeouts arrive in synchronised waves, the aggregate
+// effect is a stall, not a slowdown. Measured on Tickr through the proxy
+// (PRST-4459): 4,512 timeouts in a 300s arm, two dead stretches of 56s and 9s
+// with zero transactions on chain, and a sawtooth between 187 and 5,622 tx/s.
+const defaultBatchAckTimeout = 30 * time.Second
+
+// batchAckTimeoutFor resolves the per-batch ack timeout. Unset (zero) keeps the
+// historical 30s so existing runs are unchanged; config rejects non-positive
+// values, so anything non-zero reaching here is deliberate.
+func batchAckTimeoutFor(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.L2BatchAckTimeout > 0 {
+		return cfg.L2BatchAckTimeout
+	}
+	return defaultBatchAckTimeout
+}
 
 // isNonceTooLow reports whether the sender's nonce was already consumed on chain.
 // Distinguished from the generic nonce error because the two need OPPOSITE
