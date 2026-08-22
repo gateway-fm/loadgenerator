@@ -107,6 +107,15 @@ type Config struct {
 	PrivacyOrgID         string // Org UUID to route through (direct value; takes precedence over PrivacyOrgIDFile)
 	PrivacyRouteAll      bool   // Route ALL RPC (nonce/funding/sends/receipts/verify) through the proxy — external/prod mode
 
+	// L2BatchAckTimeout bounds how long a sender worker waits for its in-flight
+	// batch to be acknowledged before giving up on that batch. Unset keeps the
+	// 30s default. Lower it when driving a rate-limited proxy edge: the worker is
+	// pinned to one account and blocks for the whole timeout, so on a chain with
+	// no mempool a single slow ack costs that account the entire window. Measured
+	// on Tickr (PRST-4459): at the 30s default, 4,512 batches timed out in a
+	// 300s arm and 53.6% of all submissions were refused.
+	L2BatchAckTimeout time.Duration
+
 	// Gasless: target chain has zero gas fees and self-authorizes senders by
 	// signature. Default for tests; the per-test request flag can also enable it.
 	// Skips funding, sends 0-value eth-transfers, uses zero gas tip/fee caps.
@@ -297,6 +306,13 @@ func Load() (*Config, *CLIConfig, error) {
 			cfg.L2ClientMaxRetries = n
 		}
 	}
+	if v := os.Getenv("L2_BATCH_ACK_TIMEOUT"); v != "" {
+		d, err := parseBatchAckTimeout(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.L2BatchAckTimeout = d
+	}
 	if v := os.Getenv("PRIVACY_RPC_URL"); v != "" {
 		cfg.PrivacyRPCURL = v
 	}
@@ -437,4 +453,22 @@ func parseIntEnv(s string) (int, error) {
 // parseInt64Env parses a string environment variable as an int64.
 func parseInt64Env(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
+}
+
+// parseBatchAckTimeout validates L2_BATCH_ACK_TIMEOUT.
+//
+// Unparseable and non-positive values are ERRORS rather than silently falling
+// back to the default. A zero timer fires immediately, so a typo would make every
+// single batch "time out" — the run would read as a total stall and the cause
+// would look like the chain rather than the flag. Failing at startup is cheaper
+// than diagnosing that from a load-test result.
+func parseBatchAckTimeout(v string) (time.Duration, error) {
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid L2_BATCH_ACK_TIMEOUT %q: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid L2_BATCH_ACK_TIMEOUT %q: must be positive", v)
+	}
+	return d, nil
 }
