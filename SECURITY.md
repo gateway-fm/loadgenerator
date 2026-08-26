@@ -44,13 +44,17 @@ The more of this you can provide, the faster we can act:
 
 ### What to expect
 
-- **Acknowledgement** within 3 business days.
-- **Initial assessment** — whether we can reproduce it and our severity
-  judgement — within 10 business days.
-- **Progress updates** at least every 10 business days until the issue is
-  resolved or we explain why we consider it out of scope.
+This is a small team. We handle reports on a best-effort basis and do not
+commit to a response time.
+
+- We will confirm that we received your report, tell you whether we can
+  reproduce the issue and how we rate its severity, and keep you updated while
+  we work on it.
 - **Credit** in the published advisory and release notes, unless you ask us not
   to.
+
+If you have not heard back and the report looks stale, ping the same channel —
+it is far more likely we missed it than that we are ignoring it.
 
 We ask that you give us a reasonable opportunity to release a fix before any
 public disclosure, and that you avoid accessing or modifying data that is not
