@@ -44,11 +44,12 @@ The more of this you can provide, the faster we can act:
 
 ### What to expect
 
-This is a small team, so we do not promise a fixed response time. In practice:
+This is a small team. We handle reports on a best-effort basis and do not
+commit to a response time.
 
-- We aim to acknowledge reports within about a week.
-- We will tell you whether we can reproduce the issue and how we rate its
-  severity once we have looked at it, and keep you updated while we work on it.
+- We will confirm that we received your report, tell you whether we can
+  reproduce the issue and how we rate its severity, and keep you updated while
+  we work on it.
 - **Credit** in the published advisory and release notes, unless you ask us not
   to.
 
