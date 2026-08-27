@@ -163,9 +163,16 @@ func New(cfg types.ReadLoadConfig, client rpc.Client, targets Targets, logger *s
 	if len(targets.Addresses) == 0 {
 		return nil, errors.New("readload: no target addresses (accounts not funded yet?)")
 	}
-	if cfg.Mix.EthCall > 0 && targets.ERC20 == (common.Address{}) {
-		return nil, errors.New("readload: mix.ethCall > 0 but no ERC-20 contract address; " +
-			"an eth_call to the zero address returns success and measures nothing")
+	// eth_call AND eth_getLogs both target the ERC-20: the call reads balanceOf on it,
+	// the filter selects by its address. Guarding only ethCall let a mix such as
+	// {getLogs: 100} on an eth-transfer run filter the ZERO address and report
+	// successful empty reads — recreating exactly the "measures nothing" failure this
+	// check exists to prevent.
+	if (cfg.Mix.EthCall > 0 || cfg.Mix.GetLogs > 0) && targets.ERC20 == (common.Address{}) {
+		return nil, errors.New("readload: mix.ethCall/mix.getLogs > 0 but no ERC-20 contract " +
+			"address; those requests would target the zero address, return success and " +
+			"measure nothing. Use a transaction type that deploys the ERC-20, or set both " +
+			"shares to 0")
 	}
 	if cfg.Mix.GetReceipt > 0 && targets.TxHash == nil {
 		return nil, errors.New("readload: mix.getReceipt > 0 but Targets.TxHash is nil")
@@ -600,14 +607,8 @@ func (e *Engine) blockTag(rnd *account.Rand) any {
 		if head <= 1 {
 			return "latest"
 		}
-		// Sample the deepest ArchiveDepthPct% of history: depth 100 spans [1, head],
-		// smaller values walk the window toward the head, which is how the real
-		// pruning horizon is located by sweep.
-		span := head * uint64(e.cfg.ArchiveDepthPct) / 100
-		if span < 1 {
-			span = 1
-		}
-		return hexutil.EncodeUint64(1 + uint64(rnd.IntN(int(min64(span, head)))))
+		oldest := e.archiveOldestBlock(head)
+		return hexutil.EncodeUint64(oldest + uint64(rnd.IntN(int(head-oldest+1))))
 
 	default: // ReadBlockRecent
 		if head == 0 {
@@ -624,6 +625,27 @@ func (e *Engine) blockTag(rnd *account.Rand) any {
 	}
 }
 
+// archiveOldestBlock returns the oldest block the archive window covers, for a window
+// that ALWAYS ENDS AT HEAD: `[head-span+1, head]` where span is ArchiveDepthPct% of
+// history. So 100 spans all of history and lowering the percentage walks the window
+// toward the head.
+//
+// The window must end at head, not start at block 1. Sampling `[1, span]` — the original
+// shape — includes block 1 at every setting, so on a pruned node every depth fails
+// identically and the sweep cannot locate the horizon it exists to find. Walking the
+// lower bound up toward head instead makes the first depth that stops failing the
+// measured horizon.
+func (e *Engine) archiveOldestBlock(head uint64) uint64 {
+	span := head * uint64(e.cfg.ArchiveDepthPct) / 100
+	if span < 1 {
+		span = 1
+	}
+	if span >= head {
+		return 1
+	}
+	return head - span + 1
+}
+
 // logRange returns a bounded [from, to] block span for eth_getLogs.
 func (e *Engine) logRange(rnd *account.Rand) (uint64, uint64, bool) {
 	head := e.head()
@@ -635,8 +657,11 @@ func (e *Engine) logRange(rnd *account.Rand) (uint64, uint64, bool) {
 		span = head
 	}
 
-	var oldest uint64 = 1
-	if e.cfg.BlockSelection != types.ReadBlockArchive {
+	var oldest uint64
+	if e.cfg.BlockSelection == types.ReadBlockArchive {
+		// Same window as the state reads, so a depth sweep moves both together.
+		oldest = e.archiveOldestBlock(head)
+	} else {
 		window := uint64(e.cfg.BlockWindow)
 		if window > head {
 			window = head
@@ -645,9 +670,9 @@ func (e *Engine) logRange(rnd *account.Rand) (uint64, uint64, bool) {
 			window = span
 		}
 		oldest = head - window + 1
-		if oldest < 1 {
-			oldest = 1
-		}
+	}
+	if oldest < 1 {
+		oldest = 1
 	}
 
 	latestStart := head - span + 1
@@ -656,13 +681,6 @@ func (e *Engine) logRange(rnd *account.Rand) (uint64, uint64, bool) {
 	}
 	from := oldest + uint64(rnd.IntN(int(latestStart-oldest+1)))
 	return from, from + span - 1, true
-}
-
-func min64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Metrics returns a snapshot of read-path results. Safe to call at any time.

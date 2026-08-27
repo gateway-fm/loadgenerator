@@ -398,7 +398,31 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 				timer.Stop()
 			}
 
-			queued := lg.sender.SendBatchAsync(lg.ctx, batchData, gated)
+			// Hand the sender its OWN slice header. SendBatchAsync retains the slice
+			// for a goroutine that reads it later, while this worker reuses
+			// batchData's backing array (`batchData[:0]` plus refill) on the next
+			// iteration. At depth 1 the worker blocks on awaitAcks before looping so
+			// they never overlap, but above 1 the wait moves to a goroutine and the
+			// worker would overwrite entries the sender is still reading — submitting
+			// the WRONG transaction bytes. Only the headers are copied; each payload
+			// comes fresh from MarshalBinary and is never reused.
+			toSend := make([][]byte, len(batchData))
+			copy(toSend, batchData)
+
+			// Take the pipeline permit BEFORE queueing, not after. Acquiring it
+			// afterwards let the worker queue one more batch and only then block, so
+			// L2_PIPELINE_BATCH_DEPTH=N actually allowed N+1 in flight per account.
+			depth := pipelineBatchDepth(lg.cfg)
+			permitHeld := false
+			if depth > 1 {
+				select {
+				case batchPermits <- struct{}{}:
+					permitHeld = true
+				case <-lg.ctx.Done():
+				}
+			}
+
+			queued := lg.sender.SendBatchAsync(lg.ctx, toSend, gated)
 
 			// PIPELINE DEPTH. At depth 1 -- the default and the historical
 			// behaviour -- the worker blocks here until this batch is fully
@@ -416,17 +440,18 @@ func (lg *LoadGenerator) senderWorker(id int, accounts []*account.Account) {
 			// WATCH `arb_sequencer_noncefailurecache_overflow` ON ANY RUN WITH
 			// DEPTH > 1. Non-zero means the cache dropped a nonce, the account
 			// needs a resync, and the arm's numbers are not trustworthy.
-			if pipelineBatchDepth(lg.cfg) > 1 {
-				if queued {
+			if depth > 1 {
+				switch {
+				case queued && permitHeld:
 					want := len(gated)
-					select {
-					case batchPermits <- struct{}{}:
-						go func() {
-							awaitAcks(want)
-							<-batchPermits
-						}()
-					case <-lg.ctx.Done():
-					}
+					go func() {
+						awaitAcks(want)
+						<-batchPermits
+					}()
+				case permitHeld:
+					// Nothing was queued, so nothing will ack: give the permit back
+					// rather than holding a slot for a batch that does not exist.
+					<-batchPermits
 				}
 			} else if queued {
 				awaitAcks(len(gated))

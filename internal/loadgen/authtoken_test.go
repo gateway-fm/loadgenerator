@@ -88,10 +88,19 @@ func TestApplyL2ClientTuning(t *testing.T) {
 			wantRetries: base.MaxRetries,
 		},
 		{
-			name:        "single attempt",
+			// The knob counts ATTEMPTS, so 1 must leave ZERO retries. It previously
+			// asserted 1, which is the bug: the one value set specifically to stop
+			// retrying still retried once (PR #62 review).
+			name:        "single attempt means no retry",
 			cfg:         config.Config{L2ClientTimeout: 45 * time.Second, L2ClientMaxRetries: 1},
 			wantTimeout: 45 * time.Second,
-			wantRetries: 1,
+			wantRetries: 0,
+		},
+		{
+			name:        "three attempts means two retries",
+			cfg:         config.Config{L2ClientMaxRetries: 3},
+			wantTimeout: base.Timeout,
+			wantRetries: 2,
 		},
 	}
 

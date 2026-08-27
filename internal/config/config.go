@@ -20,9 +20,9 @@ type Config struct {
 	L2WSURL            string // WebSocket URL for L2 newHeads (block metrics)
 	PreconfWSURL       string // WebSocket URL for preconfirmation events
 	ChainID            int64
-	GasPrice           int64  // Deprecated: Use GasTipCap instead. Kept for backwards compatibility.
-	GasTipCap          int64  // EIP-1559 priority fee (tip) in wei
-	GasFeeCap          int64  // EIP-1559 max fee per gas in wei (0 = auto from chain)
+	GasPrice           int64 // Deprecated: Use GasTipCap instead. Kept for backwards compatibility.
+	GasTipCap          int64 // EIP-1559 priority fee (tip) in wei
+	GasFeeCap          int64 // EIP-1559 max fee per gas in wei (0 = auto from chain)
 	GasLimit           uint64
 	ListenAddr         string
 	DatabasePath       string // Path to SQLite database file
@@ -42,11 +42,15 @@ type Config struct {
 	// load.
 	L2ClientTimeout time.Duration
 
-	// L2ClientMaxRetries overrides the retry count on those clients.
+	// L2ClientMaxRetries overrides how many ATTEMPTS those clients make.
 	//
-	// ZERO MEANS "KEEP THE DEFAULT" (3), not "no retries" -- deliberately, because
-	// this is the zero value of the field and an unset config must not silently
-	// change send behaviour. Pass 1 for a single attempt with no retry.
+	// Counted in ATTEMPTS, not retries: 1 means one attempt and no retry, 3 means
+	// three attempts. applyL2ClientTuning converts it to ClientConfig.MaxRetries
+	// (which counts retries after the first attempt) by subtracting one.
+	//
+	// ZERO MEANS "KEEP THE DEFAULT" (3 retries = 4 attempts), not "no retries" --
+	// deliberately, because this is the zero value of the field and an unset config
+	// must not silently change send behaviour.
 	//
 	// Retries are a client-side amplifier: each one is counted again by a per-key
 	// rate limiter that meters batch ITEMS, so a retry storm spends quota that
@@ -136,25 +140,25 @@ type CLIConfig struct {
 
 // Defaults
 const (
-	DefaultBuilderRPCURL   = "http://localhost:13000"
-	DefaultL2RPCURL        = "http://localhost:13000"
-	DefaultChainID         = 42069
-	DefaultGasPrice        = 1000000000 // 1 Gwei (deprecated, use GasTipCap)
-	DefaultGasTipCap       = 1000000000 // 1 Gwei - priority fee (tip)
-	DefaultGasFeeCap       = 0          // 0 = auto-calculate from chain gas price
-	DefaultGasLimit        = 21000
-	DefaultListenAddr      = ":3001"
-	DefaultDatabasePath    = "./data/loadgen.db"
-	DefaultDuration        = 30 * time.Second
-	DefaultNumAccounts     = 100
-	DefaultExecutionLayer      = "reth"     // "reth" or "cdk-erigon"
-	DefaultBlockTimeMS         = 250        // 250ms default block time
-	DefaultCORSAllowedOrigins  = "*"        // Allow all origins by default for dev
-	AccountSafetyMargin        = 1.5        // 50% extra accounts for safety
-	TxsPerAccountPerBlock      = 15         // TXs each account can sustain per block (conservative: reduces nonce queue depth)
-	MinAccountsForAdaptive = 500        // Minimum accounts for "adaptive" pattern
-	MaxAccountsLimit       = 5000       // Maximum accounts to prevent resource exhaustion
-	MinAccounts            = 100        // Minimum accounts for any load test
+	DefaultBuilderRPCURL      = "http://localhost:13000"
+	DefaultL2RPCURL           = "http://localhost:13000"
+	DefaultChainID            = 42069
+	DefaultGasPrice           = 1000000000 // 1 Gwei (deprecated, use GasTipCap)
+	DefaultGasTipCap          = 1000000000 // 1 Gwei - priority fee (tip)
+	DefaultGasFeeCap          = 0          // 0 = auto-calculate from chain gas price
+	DefaultGasLimit           = 21000
+	DefaultListenAddr         = ":3001"
+	DefaultDatabasePath       = "./data/loadgen.db"
+	DefaultDuration           = 30 * time.Second
+	DefaultNumAccounts        = 100
+	DefaultExecutionLayer     = "reth" // "reth" or "cdk-erigon"
+	DefaultBlockTimeMS        = 250    // 250ms default block time
+	DefaultCORSAllowedOrigins = "*"    // Allow all origins by default for dev
+	AccountSafetyMargin       = 1.5    // 50% extra accounts for safety
+	TxsPerAccountPerBlock     = 15     // TXs each account can sustain per block (conservative: reduces nonce queue depth)
+	MinAccountsForAdaptive    = 500    // Minimum accounts for "adaptive" pattern
+	MaxAccountsLimit          = 5000   // Maximum accounts to prevent resource exhaustion
+	MinAccounts               = 100    // Minimum accounts for any load test
 )
 
 // CalculateRequiredAccounts calculates the number of accounts needed for a given TPS.
@@ -221,15 +225,15 @@ func CheckAccountSufficiency(numAccounts int, targetTPS int, blockTimeMS int) st
 // Returns the config, CLI config (nil if running in server mode), and any error.
 func Load() (*Config, *CLIConfig, error) {
 	cfg := &Config{
-		BuilderRPCURL:  DefaultBuilderRPCURL,
-		L2RPCURL:       DefaultL2RPCURL,
-		ChainID:        DefaultChainID,
-		GasPrice:       DefaultGasPrice,
-		GasTipCap:      DefaultGasTipCap,
-		GasFeeCap:      DefaultGasFeeCap,
-		GasLimit:       DefaultGasLimit,
-		ListenAddr:     DefaultListenAddr,
-		DatabasePath:   DefaultDatabasePath,
+		BuilderRPCURL:      DefaultBuilderRPCURL,
+		L2RPCURL:           DefaultL2RPCURL,
+		ChainID:            DefaultChainID,
+		GasPrice:           DefaultGasPrice,
+		GasTipCap:          DefaultGasTipCap,
+		GasFeeCap:          DefaultGasFeeCap,
+		GasLimit:           DefaultGasLimit,
+		ListenAddr:         DefaultListenAddr,
+		DatabasePath:       DefaultDatabasePath,
 		ExecutionLayer:     DefaultExecutionLayer,
 		BlockTimeMS:        DefaultBlockTimeMS,
 		CORSAllowedOrigins: DefaultCORSAllowedOrigins,
@@ -307,7 +311,7 @@ func Load() (*Config, *CLIConfig, error) {
 		}
 	}
 	if v := os.Getenv("L2_BATCH_ACK_TIMEOUT"); v != "" {
-		d, err := parseBatchAckTimeout(v)
+		d, err := ParseBatchAckTimeout(v)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -455,14 +459,14 @@ func parseInt64Env(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
-// parseBatchAckTimeout validates L2_BATCH_ACK_TIMEOUT.
+// ParseBatchAckTimeout validates L2_BATCH_ACK_TIMEOUT.
 //
 // Unparseable and non-positive values are ERRORS rather than silently falling
 // back to the default. A zero timer fires immediately, so a typo would make every
 // single batch "time out" — the run would read as a total stall and the cause
 // would look like the chain rather than the flag. Failing at startup is cheaper
 // than diagnosing that from a load-test result.
-func parseBatchAckTimeout(v string) (time.Duration, error) {
+func ParseBatchAckTimeout(v string) (time.Duration, error) {
 	d, err := time.ParseDuration(v)
 	if err != nil {
 		return 0, fmt.Errorf("invalid L2_BATCH_ACK_TIMEOUT %q: %w", v, err)

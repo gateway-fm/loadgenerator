@@ -495,8 +495,11 @@ components:
         durationSec:
           type: integer
           minimum: 1
-          maximum: 3600
-          description: Test duration in seconds
+          maximum: 86400
+          description: >
+            Test duration in seconds. The server limit is 24h (maxDurationSec), raised
+            from 1h so soaks longer than an hour are accepted; a lower schema maximum
+            would make generated clients reject exactly the runs that change enables.
         numAccounts:
           type: integer
           minimum: 0
@@ -570,7 +573,19 @@ components:
         Read-query load, generated alongside transaction load at an INDEPENDENT rate so
         read and write rates can be varied separately. Omit the block entirely for a
         write-only run; nothing about the transaction path changes when it is absent.
-      required: [enabled, targetRps, mix]
+      required: [enabled]
+      # targetRps and mix are required only when enabled is true. The server accepts a
+      # block containing just {"enabled": false} — its own tests assert that — so an
+      # unconditional required list would make generated clients unable to express a
+      # request the API considers valid.
+      allOf:
+        - if:
+            properties:
+              enabled:
+                const: true
+            required: [enabled]
+          then:
+            required: [targetRps, mix]
       properties:
         enabled:
           type: boolean

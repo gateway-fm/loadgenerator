@@ -214,7 +214,8 @@ Absent from every existing arm, so no recorded or future write-only result chang
   "rpcUrl": "",                 // "" = same public URL as writes
   "blockSelection": "recent",   // latest | recent | archive   (see §3.7)
   "blockWindow": 64,            // "recent": sample within this many blocks of head
-  "archiveDepthPct": 100,       // "archive": sample the deepest N% of history
+  "archiveDepthPct": 100,       // "archive": window of the newest N% of history,
+                                //   always ending at head; 100 = all of it
   "requireArchive": true,       // fail fast if the target is not archive
   "logsRangeBlocks": 16,        // bounded eth_getLogs span
   "fullBlocks": false,          // eth_getBlockByNumber includeTxs
@@ -301,7 +302,7 @@ a cold trie walk.
 |---|---|---|---|
 | `latest` | block tag `"latest"` | head | any node |
 | `recent` (default) | random block within `blockWindow` of head | same window | any node — stays inside the ~128-block non-archive horizon |
-| `archive` | **random block over the deepest `archiveDepthPct`% of history** | full-history windows | archive nodes only |
+| `archive` | **random block in a window ending at head, spanning `archiveDepthPct`% of history** (100 = all of it) | same window | archive nodes only |
 
 Only the block-tag argument changes, so one engine and one mix serve both products.
 `recent` is the default because it is safe everywhere; `archive` must be asked for.

@@ -173,13 +173,26 @@ func TestNewRejectsMissingTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("missing ERC20 is fine when ethCall share is zero", func(t *testing.T) {
+	t.Run("missing ERC20 is fine when ethCall and getLogs shares are zero", func(t *testing.T) {
 		cfg := baseCfg()
 		cfg.Mix = types.ReadMix{GetBalance: 100}
 		tg := testTargets(1000)
 		tg.ERC20 = common.Address{}
 		if _, err := New(cfg, &mockClient{head: 1000}, tg, nil); err != nil {
 			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	// eth_getLogs filters by the ERC-20 address, so it needs the same guard as
+	// eth_call: without it, {getLogs: 100} filters the zero address and reports
+	// successful EMPTY reads — the "measures nothing" failure (PR #62 review).
+	t.Run("getLogs without ERC20", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.Mix = types.ReadMix{GetLogs: 100}
+		tg := testTargets(1000)
+		tg.ERC20 = common.Address{}
+		if _, err := New(cfg, &mockClient{head: 1000}, tg, nil); err == nil {
+			t.Fatal("expected an error when mix.getLogs > 0 and no ERC-20 address")
 		}
 	})
 }
@@ -273,7 +286,11 @@ func TestBlockTagSelection(t *testing.T) {
 		}
 	})
 
-	t.Run("archive depth narrows the window", func(t *testing.T) {
+	// The archive window must END AT HEAD, with a lower depth walking it toward head.
+	// Sampling [1, span] instead — the original shape — includes block 1 at every
+	// setting, so on a pruned node every depth fails identically and a depth sweep
+	// cannot locate the horizon it exists to find (PR #62 review).
+	t.Run("archive depth walks the window toward head", func(t *testing.T) {
 		cfg := baseCfg()
 		cfg.BlockSelection = types.ReadBlockArchive
 		cfg.ArchiveDepthPct = 10
@@ -281,11 +298,52 @@ func TestBlockTagSelection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		wantOldest := uint64(head - head/10 + 1) // 9001 for head 10000
+		var sawNearHead bool
 		for i := 0; i < 2000; i++ {
 			n := decodeTag(t, e.blockTag(rnd))
-			if n < 1 || n > head/10 {
-				t.Fatalf("depth 10%% sampled block %d, expected <= %d", n, head/10)
+			if n < wantOldest || n > head {
+				t.Fatalf("depth 10%% sampled block %d, expected within [%d,%d]", n, wantOldest, head)
 			}
+			if n > head-head/20 {
+				sawNearHead = true
+			}
+		}
+		if !sawNearHead {
+			t.Error("window never reached the newest half of its span")
+		}
+	})
+
+	t.Run("archive depth 100 still spans all history", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.BlockSelection = types.ReadBlockArchive
+		cfg.ArchiveDepthPct = 100
+		e, err := New(cfg, &mockClient{head: head}, testTargets(head), nil)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if got := e.archiveOldestBlock(head); got != 1 {
+			t.Errorf("archiveOldestBlock at depth 100 = %d, want 1 (full history)", got)
+		}
+	})
+
+	// A sweep is only useful if lowering the depth strictly raises the lower bound.
+	t.Run("lowering depth strictly raises the oldest sampled block", func(t *testing.T) {
+		var prev uint64
+		for _, pct := range []int{100, 50, 25, 10, 1} {
+			cfg := baseCfg()
+			cfg.BlockSelection = types.ReadBlockArchive
+			cfg.ArchiveDepthPct = pct
+			e, err := New(cfg, &mockClient{head: head}, testTargets(head), nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			got := e.archiveOldestBlock(head)
+			if prev != 0 && got <= prev {
+				t.Errorf("depth %d%% oldest=%d did not move past the previous %d; "+
+					"a depth sweep cannot locate the pruning horizon", pct, got, prev)
+			}
+			prev = got
 		}
 	})
 

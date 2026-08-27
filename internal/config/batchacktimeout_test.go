@@ -28,18 +28,18 @@ func TestParseBatchAckTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseBatchAckTimeout(tt.in)
+			got, err := ParseBatchAckTimeout(tt.in)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("parseBatchAckTimeout(%q) = %v, want error", tt.in, got)
+					t.Fatalf("ParseBatchAckTimeout(%q) = %v, want error", tt.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseBatchAckTimeout(%q) unexpected error: %v", tt.in, err)
+				t.Fatalf("ParseBatchAckTimeout(%q) unexpected error: %v", tt.in, err)
 			}
 			if got != tt.want {
-				t.Errorf("parseBatchAckTimeout(%q) = %v, want %v", tt.in, got, tt.want)
+				t.Errorf("ParseBatchAckTimeout(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}

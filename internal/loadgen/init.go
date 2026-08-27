@@ -79,7 +79,12 @@ func applyL2ClientTuning(cfg *config.Config, ccfg *rpc.ClientConfig) {
 		ccfg.Timeout = cfg.L2ClientTimeout
 	}
 	if cfg.L2ClientMaxRetries > 0 {
-		ccfg.MaxRetries = cfg.L2ClientMaxRetries
+		// The knob is an ATTEMPT count ("pass 1 for a single attempt with no retry"),
+		// while ClientConfig.MaxRetries counts retries AFTER the first attempt — its
+		// loops run 0..<=MaxRetries. Assigning straight across made 1 mean two
+		// attempts, i.e. the one value a user sets specifically to stop retrying still
+		// retried once.
+		ccfg.MaxRetries = cfg.L2ClientMaxRetries - 1
 	}
 	if cfg.L2MaxConnsPerHost > 0 {
 		ccfg.MaxConnsPerHost = cfg.L2MaxConnsPerHost
