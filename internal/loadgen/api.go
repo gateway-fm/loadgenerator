@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -133,13 +134,25 @@ func (lg *LoadGenerator) GetMetrics() types.TestMetrics {
 		}
 	}
 
-	// Include realistic test metrics if pattern is realistic
-	if lg.testConfig.Pattern == types.PatternRealistic {
-		result.TipHistogram = lg.metricsCol.GetTipHistogram(lg.testConfig.RealisticConfig)
+	// Include realistic test metrics for any pattern that drives a tx-type mix.
+	// This previously covered "realistic" only, so an adaptive-realistic run reported
+	// no per-type metrics at all — which is precisely why a wrong mix went unnoticed.
+	//
+	// The histogram must be bucketed with the EFFECTIVE config, not the raw request:
+	// adaptive-realistic needs no realisticConfig, and passing the nil straight through
+	// made GetTipHistogram return nil, so /v1/status silently omitted the histogram for
+	// exactly the default case — while persistence, which does use the effective config,
+	// recorded it. Same resolution in both places (PR #62 review).
+	if realisticCfg := workload.EffectiveRealisticConfig(lg.testConfig.Pattern, lg.testConfig.RealisticConfig); realisticCfg != nil {
+		result.TipHistogram = lg.metricsCol.GetTipHistogram(realisticCfg)
 		result.TxTypeMetrics = lg.metricsCol.GetTxTypeMetrics()
 		result.AccountsFunded = lg.accountMgr.GetAccountsFunded()
 		result.AccountsActive = len(lg.accountMgr.GetDynamicAccounts())
 	}
+
+	// Read-path metrics, reported alongside — never inside — the transaction counters
+	// so a read regression cannot hide in the write numbers. Nil when read load is off.
+	result.ReadLoad = lg.readLoadMetrics()
 
 	// Include initialization progress if initializing
 	if status == types.StatusInitializing {

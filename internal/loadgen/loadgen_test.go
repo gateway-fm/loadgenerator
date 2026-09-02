@@ -13,6 +13,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/execnode"
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -304,6 +305,141 @@ func TestStartTest_ValidatesRealisticConfig(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error for invalid realistic config ratios")
+	}
+}
+
+// PRST-4293 regression. Ratio validation used to be gated on PatternRealistic alone,
+// so adaptive-realistic accepted a mix that did not sum to 100 — and SelectRandomTxType
+// then routed every unallocated share to heavyCompute at 500k gas, silently.
+func TestStartTest_ValidatesRealisticConfigForAdaptiveRealistic(t *testing.T) {
+	lg := newTestLoadGenerator(t)
+
+	err := lg.StartTest(types.StartTestRequest{
+		Pattern:     types.PatternAdaptiveRealistic,
+		DurationSec: 10,
+		RealisticConfig: &types.RealisticTestConfig{
+			TargetTPS:   100,
+			NumAccounts: 10,
+			TxTypeRatios: types.TxTypeRatio{
+				EthTransfer: 50, // sums to 50, not 100
+			},
+		},
+	})
+
+	if err == nil {
+		t.Fatal("expected adaptive-realistic to reject a tx-type mix that does not sum to 100")
+	}
+}
+
+// PRST-4293 regression. The contract-deployment decision must be derived from
+// txTypeRatios for BOTH realistic patterns. It used to be gated on PatternRealistic,
+// so for adaptive-realistic the unset transactionType defaulted to eth-transfer, no
+// contracts were deployed, and every ERC-20/Uniswap transaction was built against the
+// zero address — 21,375 gas/tx measured where the 80/20 mix should have cost 75,700.
+// Calls workload.DeployTxTypeFor — the function runInitialization actually uses — rather
+// than a copy of its logic, so reverting the implementation fails this test.
+//
+// The omitted-realisticConfig cases are the important ones: the workers fall back to
+// DefaultRealisticConfig (15% uniswapSwap, 20% erc20Transfer), so a deploy decision that
+// only looked at `RealisticConfig != nil` deployed nothing and sent those transactions to
+// the zero address at ~21,375 gas/tx.
+func TestDeployTypeDerivedForBothRealisticPatterns(t *testing.T) {
+	mix := func(r types.TxTypeRatio) *types.RealisticTestConfig {
+		return &types.RealisticTestConfig{TxTypeRatios: r}
+	}
+
+	tests := []struct {
+		name string
+		req  types.StartTestRequest
+		want types.TransactionType
+	}{
+		{
+			"realistic 80/20 erc20+uniswap deploys uniswap",
+			types.StartTestRequest{
+				Pattern:         types.PatternRealistic,
+				TransactionType: types.TxTypeEthTransfer,
+				RealisticConfig: mix(types.TxTypeRatio{ERC20Transfer: 80, UniswapSwap: 20}),
+			},
+			types.TxTypeUniswapSwap,
+		},
+		{
+			"adaptive-realistic 80/20 erc20+uniswap deploys uniswap",
+			types.StartTestRequest{
+				Pattern:         types.PatternAdaptiveRealistic,
+				TransactionType: types.TxTypeEthTransfer,
+				RealisticConfig: mix(types.TxTypeRatio{ERC20Transfer: 80, UniswapSwap: 20}),
+			},
+			types.TxTypeUniswapSwap,
+		},
+		{
+			"erc20-only mix deploys the ERC-20",
+			types.StartTestRequest{
+				Pattern:         types.PatternRealistic,
+				TransactionType: types.TxTypeEthTransfer,
+				RealisticConfig: mix(types.TxTypeRatio{ERC20Transfer: 100}),
+			},
+			types.TxTypeERC20Transfer,
+		},
+		{
+			// The regression Ivan found on PR #52: no realisticConfig at all.
+			"adaptive-realistic with NO realisticConfig still deploys for the default mix",
+			types.StartTestRequest{
+				Pattern:         types.PatternAdaptiveRealistic,
+				TransactionType: types.TxTypeEthTransfer,
+			},
+			types.TxTypeUniswapSwap, // DefaultRealisticConfig has uniswapSwap: 15
+		},
+		{
+			"all-eth-transfer mix needs no contracts",
+			types.StartTestRequest{
+				Pattern:         types.PatternRealistic,
+				TransactionType: types.TxTypeEthTransfer,
+				RealisticConfig: mix(types.TxTypeRatio{EthTransfer: 100}),
+			},
+			types.TxTypeEthTransfer,
+		},
+		{
+			"single-type patterns are untouched",
+			types.StartTestRequest{
+				Pattern:         types.PatternConstant,
+				TransactionType: types.TxTypeERC721Transfer,
+			},
+			types.TxTypeERC721Transfer,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := workload.DeployTxTypeFor(tc.req)
+			if got != tc.want {
+				t.Fatalf("DeployTxTypeFor = %q, want %q; a wrong answer here means contracts "+
+					"are not deployed and transactions target the zero address", got, tc.want)
+			}
+		})
+	}
+}
+
+// The deploy decision and the workers' selection must read the same config, or they can
+// disagree again the way they did for adaptive-realistic.
+func TestDeployDecisionAndWorkerSelectionAgree(t *testing.T) {
+	for _, req := range []types.StartTestRequest{
+		{Pattern: types.PatternAdaptiveRealistic, TransactionType: types.TxTypeEthTransfer},
+		{Pattern: types.PatternRealistic, TransactionType: types.TxTypeEthTransfer,
+			RealisticConfig: &types.RealisticTestConfig{
+				TxTypeRatios: types.TxTypeRatio{ERC20Transfer: 80, UniswapSwap: 20}}},
+	} {
+		cfg := workload.EffectiveRealisticConfig(req.Pattern, req.RealisticConfig)
+		if cfg == nil {
+			t.Fatalf("%s: workers would use a mix but EffectiveRealisticConfig returned nil", req.Pattern)
+		}
+		deploy := workload.DeployTxTypeFor(req)
+		if cfg.TxTypeRatios.UniswapSwap > 0 && deploy != types.TxTypeUniswapSwap {
+			t.Errorf("%s: workers send uniswapSwap but deploy decision was %q", req.Pattern, deploy)
+		}
+		if deploy == types.TxTypeEthTransfer && (cfg.TxTypeRatios.ERC20Transfer > 0 ||
+			cfg.TxTypeRatios.UniswapSwap > 0) {
+			t.Errorf("%s: deploy decision skips contracts the workers need", req.Pattern)
+		}
 	}
 }
 

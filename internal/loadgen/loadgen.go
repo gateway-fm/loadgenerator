@@ -18,6 +18,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/metrics"
 	"github.com/gateway-fm/loadgenerator/internal/pattern"
 	"github.com/gateway-fm/loadgenerator/internal/ratelimit"
+	"github.com/gateway-fm/loadgenerator/internal/readload"
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/sender"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
@@ -40,13 +41,13 @@ type LoadGenerator struct {
 	builderClient        rpc.Client
 	privacyBuilderClient rpc.Client // Privacy-routed builder client (optional)
 	l2Client             rpc.Client
-	accountMgr    AccountManager
-	patternReg    *pattern.Registry
-	txBuilderReg  *txbuilder.Registry
-	metricsCol    metrics.Collector
-	deployer      ContractDeployer
-	storage       storage.Storage
-	cacheStorage  storage.CacheStorage
+	accountMgr           AccountManager
+	patternReg           *pattern.Registry
+	txBuilderReg         *txbuilder.Registry
+	metricsCol           metrics.Collector
+	deployer             ContractDeployer
+	storage              storage.Storage
+	cacheStorage         storage.CacheStorage
 
 	// Contract addresses
 	erc20Contract       common.Address
@@ -168,6 +169,15 @@ type LoadGenerator struct {
 	sender        TxSender
 	defaultSender TxSender // Original sender (restored after privacy-mode tests)
 
+	// Read-query load. Nil unless the test config enables it, so a write-only run
+	// starts no read goroutines and allocates no read client. The engine deliberately
+	// shares none of the counters above: read errors must never reach the write-side
+	// circuit breaker or the adaptive controller's pending count.
+	//
+	// Atomic because it is written from the initialization goroutine and read from HTTP
+	// handlers (`/v1/status` is polled throughout initialization to show initPhase).
+	readEngine atomic.Pointer[readload.Engine]
+
 	// Test history (in-memory cache for backwards compatibility)
 	testHistory   []types.TestResult
 	testHistoryMu sync.RWMutex
@@ -212,7 +222,6 @@ type LoadGenerator struct {
 	// Logger
 	logger *slog.Logger
 }
-
 
 // Option configures a LoadGenerator. Use WithXxx functions to override defaults.
 type Option func(*LoadGenerator)
@@ -306,12 +315,26 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 			logger.Warn("privacy route-all client deferred until test start (auth token not available yet)", "error", err)
 		}
 	}
+	// Bearer credential for the builder/L2 endpoints, e.g. a Gateway RPC API key
+	// on a rate-limited proxy edge. Empty when unconfigured, and the client then
+	// sends no Authorization header at all.
+	authToken := l2AuthToken(cfg, logger)
+	if authToken != "" {
+		logger.Info("L2/builder RPC clients will send an Authorization header",
+			"tokenFile", cfg.L2AuthTokenFile)
+	}
+	if cfg.L2ClientTimeout > 0 || cfg.L2ClientMaxRetries > 0 {
+		logger.Info("L2/builder RPC client tuning applied",
+			"timeout", cfg.L2ClientTimeout, "maxRetries", cfg.L2ClientMaxRetries)
+	}
 	if lg.builderClient == nil {
 		if routeAllClient != nil {
 			lg.builderClient = routeAllClient
 		} else {
 			builderCfg := rpc.DefaultClientConfig(cfg.BuilderRPCURL)
 			builderCfg.Logger = logger
+			builderCfg.AuthToken = authToken
+			applyL2ClientTuning(cfg, &builderCfg)
 			lg.builderClient = rpc.NewHTTPClient(builderCfg)
 		}
 	}
@@ -321,6 +344,8 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 		} else {
 			l2Cfg := rpc.DefaultClientConfig(cfg.L2RPCURL)
 			l2Cfg.Logger = logger
+			l2Cfg.AuthToken = authToken
+			applyL2ClientTuning(cfg, &l2Cfg)
 			lg.l2Client = rpc.NewHTTPClient(l2Cfg)
 		}
 	}
@@ -348,8 +373,19 @@ func NewLoadGenerator(cfg *config.Config, store storage.Storage, logger *slog.Lo
 	// required = target_tps × avg_rpc_latency_sec (e.g., 30k × 0.02 = 600 minimum)
 	if lg.sender == nil {
 		lg.sender = sender.New(sender.Config{
-			Client:      lg.builderClient,
-			Concurrency: 2000, // Max concurrent in-flight sends
+			Client: lg.builderClient,
+			// 16000 for PRST-4453, tracking maxSenderWorkers 2000 -> 4000. The
+			// invariant is concurrency = 4x the worker pool: each worker
+			// consumes one semaphore slot per BATCH, so at 1x a single round of
+			// concurrent batches saturates the semaphore and serialises
+			// sending -- which shows up as a throughput ceiling that looks like
+			// the chain and is entirely client-side. Raising the pool without
+			// raising this would reintroduce exactly that.
+			// (Was 8000 for a 2000 pool in PRST-4262, itself up from 2000.)
+			// senderConcurrency keeps the documented 4x-the-pool invariant when
+			// L2_MAX_SENDER_WORKERS moves the pool. Unset it is 4000*4 = 16000,
+			// exactly the previous literal.
+			Concurrency: senderConcurrency(cfg), // Max concurrent in-flight sends
 			Logger:      logger,
 		})
 	}
@@ -413,7 +449,7 @@ func (lg *LoadGenerator) StartTest(req types.StartTestRequest) error {
 	lg.testConfig = req
 
 	// Validate realistic config if provided
-	if req.Pattern == types.PatternRealistic && req.RealisticConfig != nil {
+	if workload.UsesRealisticMix(req.Pattern) && req.RealisticConfig != nil {
 		if err := workload.ValidateTxTypeRatios(req.RealisticConfig.TxTypeRatios); err != nil {
 			lg.setError(fmt.Sprintf("invalid realistic config: %v", err))
 			return err
@@ -456,6 +492,11 @@ func (lg *LoadGenerator) stopTest() {
 	if !atomic.CompareAndSwapInt32(&lg.stopping, 0, 1) {
 		return
 	}
+
+	// Stop read load first, so its elapsed window matches the load phase rather than
+	// being stretched by the post-test confirmation and verification sequence (which
+	// would understate the achieved read rate).
+	lg.stopReadLoad()
 
 	// Stop incremental verification and run final snapshot
 	lg.stopIncrementalVerification()
@@ -641,4 +682,3 @@ func (lg *LoadGenerator) setError(msg string) {
 	lg.statusMu.Unlock()
 	lg.logger.Error("test error", "error", msg)
 }
-

@@ -18,6 +18,55 @@ import (
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
+// envDuration parses a Go duration from env, returning 0 (meaning "keep the
+// client default") when unset or unparseable.
+func envDuration(key string) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// batchAckTimeoutFromEnv reads L2_BATCH_ACK_TIMEOUT through the SAME validator
+// config.Load uses, and exits on an invalid value.
+//
+// This binary builds its Config by hand and never calls config.Load, so without this
+// the variable was simply ignored: every run silently kept the 30s default and the
+// promised "fail at startup on a bad value" could not happen. A zero or unparseable
+// timeout is fatal on purpose — a timer that fires immediately makes every batch look
+// timed out, which reads as a stalled chain rather than a typo.
+func batchAckTimeoutFromEnv(logger *slog.Logger) time.Duration {
+	v := os.Getenv("L2_BATCH_ACK_TIMEOUT")
+	if v == "" {
+		return 0 // unset: workers keep their default
+	}
+	d, err := config.ParseBatchAckTimeout(v)
+	if err != nil {
+		logger.Error("invalid L2_BATCH_ACK_TIMEOUT", "error", err)
+		os.Exit(1)
+	}
+	return d
+}
+
+// envPositiveInt parses a positive int from env, returning 0 (meaning "keep the
+// client default") when unset, unparseable or non-positive.
+func envPositiveInt(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 func main() {
 	builderURL := flag.String("builder", loadgen.GetEnvOrDefault("BUILDER_RPC_URL", "http://localhost:13000"), "Block builder RPC URL")
 	l2URL := flag.String("l2", loadgen.GetEnvOrDefault("L2_RPC_URL", "http://localhost:13000"), "L2 RPC URL")
@@ -95,6 +144,14 @@ func main() {
 		DatabasePath:         *databasePath,
 		BlockTimeMS:          *blockTimeMS,
 		ExecutionLayer:       *executionLayer,
+		L2AuthTokenFile:      os.Getenv("L2_AUTH_TOKEN_FILE"),
+		L2ClientTimeout:      envDuration("L2_CLIENT_TIMEOUT"),
+		L2ClientMaxRetries:   envPositiveInt("L2_CLIENT_MAX_RETRIES"),
+		L2MaxConnsPerHost:    envPositiveInt("L2_MAX_CONNS_PER_HOST"),
+		L2MaxSenderWorkers:   envPositiveInt("L2_MAX_SENDER_WORKERS"),
+		L2PipelineBatchDepth: envPositiveInt("L2_PIPELINE_BATCH_DEPTH"),
+		L2BatchAckTimeout:    batchAckTimeoutFromEnv(logger),
+		L2ForceHTTP2:         os.Getenv("L2_FORCE_HTTP2") == "true" || os.Getenv("L2_FORCE_HTTP2") == "1",
 		PrivacyRPCURL:        os.Getenv("PRIVACY_RPC_URL"),
 		PrivacyAuthTokenFile: os.Getenv("PRIVACY_AUTH_TOKEN_FILE"),
 		PrivacyOrgIDFile:     os.Getenv("PRIVACY_ORG_ID_FILE"),

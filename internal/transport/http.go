@@ -12,19 +12,20 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gateway-fm/loadgenerator/internal/readload"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
 // Input validation constants
 const (
-	maxDurationSec  = 3600    // Maximum test duration: 1 hour
-	maxTPS          = 100000  // Maximum TPS
-	maxAccounts     = 100000  // Maximum number of accounts
-	maxRampSteps    = 1000    // Maximum ramp steps
-	maxSpikeRate    = 100000  // Maximum spike rate
-	maxSpikeDur     = 3600    // Maximum spike duration
-	maxSpikeInt     = 3600    // Maximum spike interval
+	maxDurationSec = 86400  // Maximum test duration: 24 hours (soak runs need >1h)
+	maxTPS         = 100000 // Maximum TPS
+	maxAccounts    = 100000 // Maximum number of accounts
+	maxRampSteps   = 1000   // Maximum ramp steps
+	maxSpikeRate   = 100000 // Maximum spike rate
+	maxSpikeDur    = 3600   // Maximum spike duration
+	maxSpikeInt    = 3600   // Maximum spike interval
 )
 
 // validPatterns contains all valid load patterns
@@ -89,6 +90,13 @@ func validateStartRequest(req *types.StartTestRequest) error {
 	}
 	if req.Erc721PreMint > 0 && req.TransactionType != types.TxTypeERC721Transfer {
 		return fmt.Errorf("erc721PreMint only valid with transactionType=erc721-transfer")
+	}
+
+	// Read-load validation. Opt-in: a nil block means a write-only run, unchanged.
+	if req.ReadLoad != nil {
+		if err := readload.Validate(*req.ReadLoad); err != nil {
+			return err
+		}
 	}
 
 	// Pattern-specific validation

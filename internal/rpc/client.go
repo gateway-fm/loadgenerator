@@ -165,6 +165,47 @@ type ClientConfig struct {
 	MaxBackoff     time.Duration
 	Logger         *slog.Logger
 	AuthToken      string // Optional Bearer token for Authorization header
+
+	// MaxConnsPerHost overrides the transport's connection cap. Zero keeps the
+	// default 2000.
+	//
+	// This binds against an HTTPS endpoint in a way it never does against plain
+	// HTTP. MaxConnsPerHost is a HARD cap: once it is reached, further requests
+	// BLOCK waiting for a connection to free rather than opening one. With one
+	// sender worker per account (4000 of them) against a 2000 cap, half of them
+	// can be queued at the transport before a single byte is sent -- and each new
+	// connection to a TLS endpoint additionally pays a handshake.
+	//
+	// Why that matters beyond latency: a request stalled in the transport queue
+	// only fails when the client Timeout expires, and its send callback fires at
+	// that point. The sender's per-account batch gate gives up after
+	// batchAckTimeout (30s, hardcoded in loadgen). So any client timeout at or
+	// above 30s means a queued request cannot acknowledge before the ordering
+	// window closes, the batch is abandoned "without ordering guarantee", and on
+	// a chain with no mempool the out-of-order nonces behind it are refused.
+	// Measured on Tickr's edge: continuous batch-ack timeouts against an edge
+	// profiled at 16.79% of one core -- i.e. the queue was ours, not the server's.
+	MaxConnsPerHost int
+
+	// ForceHTTP2 enables HTTP/2 on the builder/L2 transport. Default false, which
+	// is what this client has always done.
+	//
+	// It matters only against a TLS endpoint, and it attacks the one thing that
+	// has been shown to move throughput on a proxy edge: LATENCY, not
+	// parallelism. Over HTTP/1.1 every concurrent request needs its own
+	// connection, so N in-flight requests cost N TLS handshakes and queue behind
+	// MaxConnsPerHost once it is reached. HTTP/2 multiplexes them as streams over
+	// ONE connection, so concurrency stops costing handshakes and stops queueing.
+	//
+	// Measured on Tickr's edge (PRST-4459): adding parallelism anywhere -- proxy
+	// CPU, connection cap, funded accounts, sender workers -- did not raise
+	// throughput, because ack latency rose in proportion. Only changes that
+	// REMOVED latency did. HTTP/2 is the remaining one of those on the client.
+	//
+	// Requires the server to negotiate h2 over ALPN. If it does not, Go silently
+	// stays on HTTP/1.1, so this is safe to enable speculatively -- but verify
+	// which protocol was actually used before crediting it with a result.
+	ForceHTTP2 bool
 }
 
 // DefaultClientConfig returns default configuration.
@@ -193,13 +234,20 @@ type HTTPClient struct {
 
 // NewHTTPClient creates a new HTTP-based RPC client.
 func NewHTTPClient(cfg ClientConfig) *HTTPClient {
+	maxConns := cfg.MaxConnsPerHost
+	if maxConns <= 0 {
+		maxConns = 2000 // Must match sender concurrency
+	}
 	transport := &http.Transport{
-		MaxIdleConns:        4000,
-		MaxIdleConnsPerHost: 2000,
-		MaxConnsPerHost:     2000, // Must match sender concurrency
+		// Idle caps track the hard cap: an idle pool smaller than the connection
+		// cap means established connections are closed and re-dialled instead of
+		// reused, which against a TLS endpoint re-pays the handshake every time.
+		MaxIdleConns:        maxConns * 2,
+		MaxIdleConnsPerHost: maxConns,
+		MaxConnsPerHost:     maxConns,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
-		ForceAttemptHTTP2:   false,
+		ForceAttemptHTTP2:   cfg.ForceHTTP2,
 	}
 
 	logger := cfg.Logger

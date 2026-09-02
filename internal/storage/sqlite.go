@@ -214,6 +214,8 @@ func (s *SQLiteStorage) migrate() error {
 		{"test_runs", "test_accounts", "ALTER TABLE test_runs ADD COLUMN test_accounts TEXT"},
 		// Privacy proxy mode
 		{"test_runs", "privacy_mode", "ALTER TABLE test_runs ADD COLUMN privacy_mode INTEGER DEFAULT 0"},
+		// Read-query load results, including the per-method breakdown (JSON)
+		{"test_runs", "read_load", "ALTER TABLE test_runs ADD COLUMN read_load TEXT"},
 	}
 
 	for _, m := range migrations {
@@ -318,6 +320,7 @@ func (s *SQLiteStorage) CompleteTestRun(ctx context.Context, id string, run *Tes
 	verificationJSON, _ := json.Marshal(run.Verification)
 	deployedContractsJSON, _ := json.Marshal(run.DeployedContracts)
 	testAccountsJSON, _ := json.Marshal(run.TestAccounts)
+	readLoadJSON, _ := json.Marshal(run.ReadLoad)
 
 	now := time.Now()
 	_, err := s.db.ExecContext(ctx, `
@@ -353,7 +356,8 @@ func (s *SQLiteStorage) CompleteTestRun(ctx context.Context, id string, run *Tes
 			environment = ?,
 			verification = ?,
 			deployed_contracts = ?,
-			test_accounts = ?
+			test_accounts = ?,
+			read_load = ?
 		WHERE id = ?
 	`, now, run.TxSent, run.TxConfirmed, run.TxFailed, run.TxDiscarded, run.AverageTPS, run.PeakTPS,
 		string(latencyJSON), string(preconfJSON), string(pendingLatencyJSON), run.Status, run.ErrorMessage,
@@ -362,7 +366,7 @@ func (s *SQLiteStorage) CompleteTestRun(ctx context.Context, id string, run *Tes
 		run.OnChainFirstBlock, run.OnChainLastBlock, run.OnChainTxCount, run.OnChainGasUsed,
 		run.OnChainMgasPerSec, run.OnChainTps, run.OnChainDurationSecs,
 		string(environmentJSON), string(verificationJSON),
-		string(deployedContractsJSON), string(testAccountsJSON), id)
+		string(deployedContractsJSON), string(testAccountsJSON), string(readLoadJSON), id)
 
 	return err
 }
@@ -383,7 +387,8 @@ func (s *SQLiteStorage) GetTestRun(ctx context.Context, id string) (*TestRun, er
 			COALESCE(on_chain_mgas_per_sec, 0), COALESCE(on_chain_tps, 0), COALESCE(on_chain_duration_secs, 0),
 			environment, verification,
 			deployed_contracts, test_accounts,
-			COALESCE(privacy_mode, 0)
+			COALESCE(privacy_mode, 0),
+			read_load
 		FROM test_runs WHERE id = ?
 	`, id)
 
@@ -414,7 +419,8 @@ func (s *SQLiteStorage) ListTestRuns(ctx context.Context, limit, offset int) (*P
 			COALESCE(on_chain_mgas_per_sec, 0), COALESCE(on_chain_tps, 0), COALESCE(on_chain_duration_secs, 0),
 			environment, verification,
 			deployed_contracts, test_accounts,
-			COALESCE(privacy_mode, 0)
+			COALESCE(privacy_mode, 0),
+			read_load
 		FROM test_runs
 		ORDER BY is_favorite DESC, started_at DESC
 		LIMIT ? OFFSET ?
@@ -722,7 +728,7 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 	var customName sql.NullString
 	var isFavorite int
 	var tipHistogramJSON, txTypeMetricsJSON sql.NullString
-	var environmentJSON, verificationJSON sql.NullString
+	var environmentJSON, verificationJSON, readLoadJSON sql.NullString
 	var deployedContractsJSON, testAccountsJSON sql.NullString
 
 	var privacyMode int
@@ -737,7 +743,8 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 		&run.OnChainMgasPerSec, &run.OnChainTps, &run.OnChainDurationSecs,
 		&environmentJSON, &verificationJSON,
 		&deployedContractsJSON, &testAccountsJSON,
-		&privacyMode)
+		&privacyMode,
+		&readLoadJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -795,6 +802,12 @@ func (s *SQLiteStorage) scanTestRun(row *sql.Row) (*TestRun, error) {
 		run.TestAccounts = &TestAccountsInfo{}
 		unmarshalJSON(testAccountsJSON.String, run.TestAccounts, "test_accounts", run.ID)
 	}
+	// "null" is what json.Marshal writes for a nil pointer on a write-only run, so
+	// guard against it or every such run comes back with a zero-valued readLoad block.
+	if readLoadJSON.Valid && readLoadJSON.String != "" && readLoadJSON.String != "null" {
+		run.ReadLoad = &types.ReadLoadMetrics{}
+		unmarshalJSON(readLoadJSON.String, run.ReadLoad, "read_load", run.ID)
+	}
 
 	return &run, nil
 }
@@ -807,7 +820,7 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 	var customName sql.NullString
 	var isFavorite int
 	var tipHistogramJSON, txTypeMetricsJSON sql.NullString
-	var environmentJSON, verificationJSON sql.NullString
+	var environmentJSON, verificationJSON, readLoadJSON sql.NullString
 	var deployedContractsJSON, testAccountsJSON sql.NullString
 	var privacyMode int
 
@@ -822,7 +835,8 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 		&run.OnChainMgasPerSec, &run.OnChainTps, &run.OnChainDurationSecs,
 		&environmentJSON, &verificationJSON,
 		&deployedContractsJSON, &testAccountsJSON,
-		&privacyMode)
+		&privacyMode,
+		&readLoadJSON)
 
 	if err != nil {
 		return nil, err
@@ -876,6 +890,12 @@ func (s *SQLiteStorage) scanTestRunFromRows(rows *sql.Rows) (*TestRun, error) {
 	if testAccountsJSON.Valid && testAccountsJSON.String != "" {
 		run.TestAccounts = &TestAccountsInfo{}
 		unmarshalJSON(testAccountsJSON.String, run.TestAccounts, "test_accounts", run.ID)
+	}
+	// "null" is what json.Marshal writes for a nil pointer on a write-only run, so
+	// guard against it or every such run comes back with a zero-valued readLoad block.
+	if readLoadJSON.Valid && readLoadJSON.String != "" && readLoadJSON.String != "null" {
+		run.ReadLoad = &types.ReadLoadMetrics{}
+		unmarshalJSON(readLoadJSON.String, run.ReadLoad, "read_load", run.ID)
 	}
 
 	return &run, nil

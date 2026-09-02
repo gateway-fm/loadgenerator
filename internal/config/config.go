@@ -20,9 +20,9 @@ type Config struct {
 	L2WSURL            string // WebSocket URL for L2 newHeads (block metrics)
 	PreconfWSURL       string // WebSocket URL for preconfirmation events
 	ChainID            int64
-	GasPrice           int64  // Deprecated: Use GasTipCap instead. Kept for backwards compatibility.
-	GasTipCap          int64  // EIP-1559 priority fee (tip) in wei
-	GasFeeCap          int64  // EIP-1559 max fee per gas in wei (0 = auto from chain)
+	GasPrice           int64 // Deprecated: Use GasTipCap instead. Kept for backwards compatibility.
+	GasTipCap          int64 // EIP-1559 priority fee (tip) in wei
+	GasFeeCap          int64 // EIP-1559 max fee per gas in wei (0 = auto from chain)
 	GasLimit           uint64
 	ListenAddr         string
 	DatabasePath       string // Path to SQLite database file
@@ -30,11 +30,95 @@ type Config struct {
 	BlockTimeMS        int    // Block time in milliseconds (for account scaling)
 	CORSAllowedOrigins string // Comma-separated list of allowed origins, or "*" for all (default: "*")
 
+	// L2ClientTimeout overrides the per-request timeout on the builder and L2
+	// HTTP clients. Zero means keep DefaultClientConfig's 2s.
+	//
+	// 2s is right against a local node and actively harmful through a proxy edge:
+	// once edge p50 exceeds the timeout, the client abandons requests the edge is
+	// still serving and retries them, so the transaction lands AND is re-sent.
+	// Measured on Tickr's edge (PRST-4459): ~2 successful send requests per landed
+	// transaction, plus enough retry traffic to consume the API key's whole
+	// per-second quota. Raising this trades tail latency for not manufacturing
+	// load.
+	L2ClientTimeout time.Duration
+
+	// L2ClientMaxRetries overrides how many ATTEMPTS those clients make.
+	//
+	// Counted in ATTEMPTS, not retries: 1 means one attempt and no retry, 3 means
+	// three attempts. applyL2ClientTuning converts it to ClientConfig.MaxRetries
+	// (which counts retries after the first attempt) by subtracting one.
+	//
+	// ZERO MEANS "KEEP THE DEFAULT" (3 retries = 4 attempts), not "no retries" --
+	// deliberately, because this is the zero value of the field and an unset config
+	// must not silently change send behaviour.
+	//
+	// Retries are a client-side amplifier: each one is counted again by a per-key
+	// rate limiter that meters batch ITEMS, so a retry storm spends quota that
+	// useful work then cannot have.
+	L2ClientMaxRetries int
+
+	// L2MaxSenderWorkers overrides the sender goroutine pool. Zero keeps the
+	// built-in 4000.
+	//
+	// This is the throughput ceiling on a no-mempool chain, and the arithmetic is
+	// simple enough to be worth stating: each worker is pinned to ONE account and
+	// gated on that account's batch acknowledgement before it sends again, so
+	// aggregate throughput is bounded by `workers / ack_latency` regardless of how
+	// many accounts are funded or how high the target rate is set.
+	//
+	// Measured on Tickr's edge: 4000 workers at ~1.8 s ack latency gave 2,218
+	// tx/s on chain -- 4000/1.8 = 2,222, i.e. the cap explained the ceiling to
+	// within 0.2%, while the edge itself profiled at 16.79% of one core and the
+	// sequencer was closing blocks for lack of work.
+	//
+	// Raising it REQUIRES raising sender concurrency in step (the invariant is
+	// concurrency = 4x the pool; see loadgen.go), and requires that many funded
+	// accounts to exist -- a worker with no distinct account of its own just
+	// contends for one already in use.
+	L2MaxSenderWorkers int
+
+	// L2MaxConnsPerHost overrides the builder/L2 transport connection cap. Zero
+	// keeps the client default of 2000. See rpc.ClientConfig.MaxConnsPerHost for
+	// why this binds against a TLS edge and not against a plain-HTTP node.
+	L2MaxConnsPerHost int
+
+	// L2PipelineBatchDepth is how many batches may be in flight per sender
+	// account. Default 1 = strict serialisation, the historical behaviour.
+	//
+	// This is the ONLY remaining lever on a latency-bound path: throughput is
+	// `accounts x depth x batch / round_trip`, and unlike adding workers or
+	// connections, depth does not inflate the round trip -- it overlaps waits that
+	// were previously serial. Above 1 it depends on the chain parking too-high
+	// nonces rather than refusing them; see pipelineBatchDepth.
+	L2PipelineBatchDepth int
+
+	// L2ForceHTTP2 enables HTTP/2 on the builder/L2 transport. Default false.
+	// Multiplexes concurrent requests as streams over one connection, so
+	// concurrency stops costing TLS handshakes and stops queueing behind the
+	// connection cap. See rpc.ClientConfig.ForceHTTP2.
+	L2ForceHTTP2 bool
+
+	// L2AuthTokenFile is a path to a file holding a bearer credential to send as
+	// "Authorization: Bearer <token>" on the builder and L2 HTTP clients. A file
+	// rather than a plain value so the credential does not appear in the process
+	// environment (kubectl describe pod, docker inspect, set -x). Empty means no
+	// header is sent, so unkeyed runs are byte-identical to before.
+	L2AuthTokenFile string
+
 	PrivacyRPCURL        string // Privacy proxy RPC URL (optional)
 	PrivacyAuthTokenFile string // Path to file containing JWT Bearer token
 	PrivacyOrgIDFile     string // Path to file with the org UUID to route through (/rpc/{org}); for multi-org users
 	PrivacyOrgID         string // Org UUID to route through (direct value; takes precedence over PrivacyOrgIDFile)
 	PrivacyRouteAll      bool   // Route ALL RPC (nonce/funding/sends/receipts/verify) through the proxy — external/prod mode
+
+	// L2BatchAckTimeout bounds how long a sender worker waits for its in-flight
+	// batch to be acknowledged before giving up on that batch. Unset keeps the
+	// 30s default. Lower it when driving a rate-limited proxy edge: the worker is
+	// pinned to one account and blocks for the whole timeout, so on a chain with
+	// no mempool a single slow ack costs that account the entire window. Measured
+	// on Tickr (PRST-4459): at the 30s default, 4,512 batches timed out in a
+	// 300s arm and 53.6% of all submissions were refused.
+	L2BatchAckTimeout time.Duration
 
 	// Gasless: target chain has zero gas fees and self-authorizes senders by
 	// signature. Default for tests; the per-test request flag can also enable it.
@@ -56,25 +140,25 @@ type CLIConfig struct {
 
 // Defaults
 const (
-	DefaultBuilderRPCURL   = "http://localhost:13000"
-	DefaultL2RPCURL        = "http://localhost:13000"
-	DefaultChainID         = 42069
-	DefaultGasPrice        = 1000000000 // 1 Gwei (deprecated, use GasTipCap)
-	DefaultGasTipCap       = 1000000000 // 1 Gwei - priority fee (tip)
-	DefaultGasFeeCap       = 0          // 0 = auto-calculate from chain gas price
-	DefaultGasLimit        = 21000
-	DefaultListenAddr      = ":3001"
-	DefaultDatabasePath    = "./data/loadgen.db"
-	DefaultDuration        = 30 * time.Second
-	DefaultNumAccounts     = 100
-	DefaultExecutionLayer      = "reth"     // "reth" or "cdk-erigon"
-	DefaultBlockTimeMS         = 250        // 250ms default block time
-	DefaultCORSAllowedOrigins  = "*"        // Allow all origins by default for dev
-	AccountSafetyMargin        = 1.5        // 50% extra accounts for safety
-	TxsPerAccountPerBlock      = 15         // TXs each account can sustain per block (conservative: reduces nonce queue depth)
-	MinAccountsForAdaptive = 500        // Minimum accounts for "adaptive" pattern
-	MaxAccountsLimit       = 5000       // Maximum accounts to prevent resource exhaustion
-	MinAccounts            = 100        // Minimum accounts for any load test
+	DefaultBuilderRPCURL      = "http://localhost:13000"
+	DefaultL2RPCURL           = "http://localhost:13000"
+	DefaultChainID            = 42069
+	DefaultGasPrice           = 1000000000 // 1 Gwei (deprecated, use GasTipCap)
+	DefaultGasTipCap          = 1000000000 // 1 Gwei - priority fee (tip)
+	DefaultGasFeeCap          = 0          // 0 = auto-calculate from chain gas price
+	DefaultGasLimit           = 21000
+	DefaultListenAddr         = ":3001"
+	DefaultDatabasePath       = "./data/loadgen.db"
+	DefaultDuration           = 30 * time.Second
+	DefaultNumAccounts        = 100
+	DefaultExecutionLayer     = "reth" // "reth" or "cdk-erigon"
+	DefaultBlockTimeMS        = 250    // 250ms default block time
+	DefaultCORSAllowedOrigins = "*"    // Allow all origins by default for dev
+	AccountSafetyMargin       = 1.5    // 50% extra accounts for safety
+	TxsPerAccountPerBlock     = 15     // TXs each account can sustain per block (conservative: reduces nonce queue depth)
+	MinAccountsForAdaptive    = 500    // Minimum accounts for "adaptive" pattern
+	MaxAccountsLimit          = 5000   // Maximum accounts to prevent resource exhaustion
+	MinAccounts               = 100    // Minimum accounts for any load test
 )
 
 // CalculateRequiredAccounts calculates the number of accounts needed for a given TPS.
@@ -141,15 +225,15 @@ func CheckAccountSufficiency(numAccounts int, targetTPS int, blockTimeMS int) st
 // Returns the config, CLI config (nil if running in server mode), and any error.
 func Load() (*Config, *CLIConfig, error) {
 	cfg := &Config{
-		BuilderRPCURL:  DefaultBuilderRPCURL,
-		L2RPCURL:       DefaultL2RPCURL,
-		ChainID:        DefaultChainID,
-		GasPrice:       DefaultGasPrice,
-		GasTipCap:      DefaultGasTipCap,
-		GasFeeCap:      DefaultGasFeeCap,
-		GasLimit:       DefaultGasLimit,
-		ListenAddr:     DefaultListenAddr,
-		DatabasePath:   DefaultDatabasePath,
+		BuilderRPCURL:      DefaultBuilderRPCURL,
+		L2RPCURL:           DefaultL2RPCURL,
+		ChainID:            DefaultChainID,
+		GasPrice:           DefaultGasPrice,
+		GasTipCap:          DefaultGasTipCap,
+		GasFeeCap:          DefaultGasFeeCap,
+		GasLimit:           DefaultGasLimit,
+		ListenAddr:         DefaultListenAddr,
+		DatabasePath:       DefaultDatabasePath,
 		ExecutionLayer:     DefaultExecutionLayer,
 		BlockTimeMS:        DefaultBlockTimeMS,
 		CORSAllowedOrigins: DefaultCORSAllowedOrigins,
@@ -194,6 +278,44 @@ func Load() (*Config, *CLIConfig, error) {
 		if fee, err := parseInt64Env(v); err == nil && fee >= 0 {
 			cfg.GasFeeCap = fee
 		}
+	}
+	if v := os.Getenv("L2_AUTH_TOKEN_FILE"); v != "" {
+		cfg.L2AuthTokenFile = v
+	}
+	if v := os.Getenv("L2_CLIENT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.L2ClientTimeout = d
+		}
+	}
+	if v := os.Getenv("L2_PIPELINE_BATCH_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 1 {
+			cfg.L2PipelineBatchDepth = n
+		}
+	}
+	if v := os.Getenv("L2_FORCE_HTTP2"); v == "true" || v == "1" {
+		cfg.L2ForceHTTP2 = true
+	}
+	if v := os.Getenv("L2_MAX_SENDER_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2MaxSenderWorkers = n
+		}
+	}
+	if v := os.Getenv("L2_MAX_CONNS_PER_HOST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2MaxConnsPerHost = n
+		}
+	}
+	if v := os.Getenv("L2_CLIENT_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L2ClientMaxRetries = n
+		}
+	}
+	if v := os.Getenv("L2_BATCH_ACK_TIMEOUT"); v != "" {
+		d, err := ParseBatchAckTimeout(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.L2BatchAckTimeout = d
 	}
 	if v := os.Getenv("PRIVACY_RPC_URL"); v != "" {
 		cfg.PrivacyRPCURL = v
@@ -335,4 +457,22 @@ func parseIntEnv(s string) (int, error) {
 // parseInt64Env parses a string environment variable as an int64.
 func parseInt64Env(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
+}
+
+// ParseBatchAckTimeout validates L2_BATCH_ACK_TIMEOUT.
+//
+// Unparseable and non-positive values are ERRORS rather than silently falling
+// back to the default. A zero timer fires immediately, so a typo would make every
+// single batch "time out" — the run would read as a total stall and the cause
+// would look like the chain rather than the flag. Failing at startup is cheaper
+// than diagnosing that from a load-test result.
+func ParseBatchAckTimeout(v string) (time.Duration, error) {
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid L2_BATCH_ACK_TIMEOUT %q: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid L2_BATCH_ACK_TIMEOUT %q: must be positive", v)
+	}
+	return d, nil
 }

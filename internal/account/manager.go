@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"math/rand/v2"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +19,64 @@ import (
 
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 )
+
+// DefaultFundAmountWei is the balance handed to each dynamic sender account:
+// 1,000 ETH-equivalent. Unchanged, so a run that does not set FUND_AMOUNT_WEI
+// behaves exactly as before.
+const DefaultFundAmountWei = "1000000000000000000000"
+
+var (
+	fundAmountOnce sync.Once
+	fundAmountWei  *big.Int
+)
+
+// PerAccountFundAmount returns the balance to hand each dynamic sender account,
+// overridable with the FUND_AMOUNT_WEI environment variable.
+//
+// WHY THIS NEEDED TO BE CONFIGURABLE (PRST-4453). The 1,000-per-account figure
+// was hardcoded in three places and is harmless on a throwaway devnet with
+// freely premined ether. It is not harmless on a CLIENT chain.
+//
+// Driving 3,000 tx/s needs roughly 4,000 sender accounts, because per-account
+// nonce velocity has to stay under ~0.75 tx/s on a chain with no mempool
+// (PRST-4367: 2,000 accounts at 1.5 tx/s each produced a persistent ~1.4%
+// failure drizzle; 4,000 removed it). At the hardcoded default that parks
+// 4,000,000 of the customer's gas token in randomly generated wallets.
+//
+// The real economic cost is ~41 tokens for a 30-minute arm at 3,000 tx/s, at a
+// 0.1 gwei floor and ~75.9k gas/tx. So the default over-provisions by ~100,000x
+// and the surplus is never spent, only parked.
+//
+// It cannot simply be swept back afterwards either -- not cheaply. These
+// accounts come from crypto.GenerateKey(), NOT from a mnemonic, so they are not
+// re-derivable: recovery depends on the SQLite cache surviving, and costs one
+// transaction per account.
+//
+// An unparseable or non-positive value falls back to the default rather than
+// failing the run: a load generator that refuses to start because of a funding
+// hint is worse than one that funds generously.
+func PerAccountFundAmount() *big.Int {
+	fundAmountOnce.Do(func() {
+		fundAmountWei = parseFundAmount(os.Getenv("FUND_AMOUNT_WEI"))
+	})
+	return new(big.Int).Set(fundAmountWei)
+}
+
+// parseFundAmount is split out from PerAccountFundAmount purely so it is
+// testable: the sync.Once above makes the exported function single-shot per
+// process, so a table test could otherwise only ever exercise one branch.
+func parseFundAmount(raw string) *big.Int {
+	def, _ := new(big.Int).SetString(DefaultFundAmountWei, 10)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def
+	}
+	v, ok := new(big.Int).SetString(raw, 10)
+	if !ok || v.Sign() <= 0 {
+		return def
+	}
+	return v
+}
 
 // Manager manages test accounts including generation, funding, and nonce tracking.
 type Manager struct {
@@ -290,7 +349,7 @@ func (m *Manager) FundDynamicAccounts(ctx context.Context, sendClient, syncClien
 		return nil
 	}
 
-	fundAmount, _ := new(big.Int).SetString("1000000000000000000000", 10) // 1,000 ETH per account (reduced from 10k for efficiency)
+	fundAmount := PerAccountFundAmount()
 	signer := types.LatestSignerForChainID(m.chainID)
 
 	// Use accounts[1..9] as faucets (9 faucets), reserve accounts[0] for deployment
@@ -449,7 +508,7 @@ func (m *Manager) fundDynamicAccountsParallel(ctx context.Context, client rpc.Cl
 		return nil
 	}
 
-	fundAmount, _ := new(big.Int).SetString("1000000000000000000000", 10) // 1,000 ETH
+	fundAmount := PerAccountFundAmount()
 	signer := types.LatestSignerForChainID(m.chainID)
 	numFaucets := 1
 	delayPerBatch := 50 * time.Millisecond
@@ -734,7 +793,7 @@ func (m *Manager) FundAccounts(ctx context.Context, sendClient, syncClient rpc.C
 		return nil
 	}
 
-	fundAmount, _ := new(big.Int).SetString("1000000000000000000000", 10) // 1,000 ETH
+	fundAmount := PerAccountFundAmount()
 	signer := types.LatestSignerForChainID(m.chainID)
 
 	numFaucets := len(m.accounts) - 1 // accounts[1..9]
@@ -918,8 +977,8 @@ func (m *Manager) recycleAccountFunds(
 
 	// Calculate amount to send (balance - gas cost)
 	gasLimit := uint64(21000)
-	gasTip := big.NewInt(1 * 1e9)   // 1 gwei tip
-	maxFee := big.NewInt(10 * 1e9)  // 10 gwei max fee
+	gasTip := big.NewInt(1 * 1e9)  // 1 gwei tip
+	maxFee := big.NewInt(10 * 1e9) // 10 gwei max fee
 	gasCost := new(big.Int).Mul(maxFee, big.NewInt(int64(gasLimit)))
 
 	// Skip if balance is too low to cover gas

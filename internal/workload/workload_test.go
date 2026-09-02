@@ -313,3 +313,31 @@ func TestValidateTxTypeRatios(t *testing.T) {
 		}
 	})
 }
+
+// UsesRealisticMix is the single predicate every "does this run drive a tx-type mix"
+// decision must go through. Contract deployment, ratio validation, metrics init and
+// worker type-selection previously each made that call independently, and for
+// adaptive-realistic they disagreed (PRST-4293).
+func TestUsesRealisticMix(t *testing.T) {
+	mixed := []types.LoadPattern{
+		types.PatternRealistic,
+		types.PatternAdaptiveRealistic,
+	}
+	single := []types.LoadPattern{
+		types.PatternConstant,
+		types.PatternRamp,
+		types.PatternSpike,
+		types.PatternAdaptive,
+	}
+
+	for _, p := range mixed {
+		if !workload.UsesRealisticMix(p) {
+			t.Errorf("pattern %q drives a tx-type mix but UsesRealisticMix returned false", p)
+		}
+	}
+	for _, p := range single {
+		if workload.UsesRealisticMix(p) {
+			t.Errorf("pattern %q uses a single tx type but UsesRealisticMix returned true", p)
+		}
+	}
+}

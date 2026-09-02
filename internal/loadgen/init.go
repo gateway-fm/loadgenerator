@@ -18,6 +18,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/rpc"
 	"github.com/gateway-fm/loadgenerator/internal/sender"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/workload"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -39,6 +40,58 @@ func privacyURL(cfg *config.Config, logger *slog.Logger) string {
 		url = strings.TrimRight(url, "/") + "/rpc/" + orgID
 	}
 	return url
+}
+
+// l2AuthToken reads the bearer credential for the builder and L2 clients from
+// cfg.L2AuthTokenFile, trimming the trailing newline a mounted secret file
+// carries. Returns "" when no file is configured or it cannot be read — an
+// unkeyed run must still start, and the failure then shows up as the edge's
+// anonymous rate limit rather than as a crash, so the warning is the signal.
+func l2AuthToken(cfg *config.Config, logger *slog.Logger) string {
+	if cfg.L2AuthTokenFile == "" {
+		return ""
+	}
+	b, err := os.ReadFile(cfg.L2AuthTokenFile)
+	if err != nil {
+		logger.Warn("could not read L2 auth token file; sending no Authorization header",
+			"path", cfg.L2AuthTokenFile, "error", err)
+		return ""
+	}
+	token := strings.TrimSpace(string(b))
+	if token == "" {
+		logger.Warn("L2 auth token file is empty; sending no Authorization header",
+			"path", cfg.L2AuthTokenFile)
+	}
+	return token
+}
+
+// applyL2ClientTuning applies the optional timeout / retry overrides to a client
+// config. Both are no-ops when unset, so an unconfigured run keeps
+// DefaultClientConfig's 2s and 3 retries exactly.
+//
+// These matter through a proxy edge and not much anywhere else. A 2s timeout
+// against an edge whose p50 is several seconds means the client abandons requests
+// the edge is still serving, then retries them -- so the transaction lands and is
+// re-sent, and a per-key limiter that counts batch ITEMS charges for both. That
+// is load the client manufactures for itself.
+func applyL2ClientTuning(cfg *config.Config, ccfg *rpc.ClientConfig) {
+	if cfg.L2ClientTimeout > 0 {
+		ccfg.Timeout = cfg.L2ClientTimeout
+	}
+	if cfg.L2ClientMaxRetries > 0 {
+		// The knob is an ATTEMPT count ("pass 1 for a single attempt with no retry"),
+		// while ClientConfig.MaxRetries counts retries AFTER the first attempt — its
+		// loops run 0..<=MaxRetries. Assigning straight across made 1 mean two
+		// attempts, i.e. the one value a user sets specifically to stop retrying still
+		// retried once.
+		ccfg.MaxRetries = cfg.L2ClientMaxRetries - 1
+	}
+	if cfg.L2MaxConnsPerHost > 0 {
+		ccfg.MaxConnsPerHost = cfg.L2MaxConnsPerHost
+	}
+	if cfg.L2ForceHTTP2 {
+		ccfg.ForceHTTP2 = true
+	}
 }
 
 // buildPrivacyClient builds a privacy-proxy-routed RPC client: routes to
@@ -133,7 +186,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	// is supported — contract types need a funded deployer and on-chain token state.
 	lg.gasless = req.Gasless || lg.cfg.Gasless
 	if lg.gasless {
-		if req.TransactionType != types.TxTypeEthTransfer || req.Pattern == types.PatternRealistic {
+		if req.TransactionType != types.TxTypeEthTransfer || workload.UsesRealisticMix(req.Pattern) {
 			lg.setError("gasless mode supports the eth-transfer transaction type only (contract types require a funded deployer)")
 			return
 		}
@@ -366,20 +419,10 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		}
 	}
 
-	// Deploy contracts if needed for non-ETH-transfer types
-	// For realistic mode, check if any non-ETH tx types are configured
-	txTypeForDeploy := req.TransactionType
-	if req.Pattern == types.PatternRealistic && req.RealisticConfig != nil {
-		ratios := req.RealisticConfig.TxTypeRatios
-		if ratios.UniswapSwap > 0 {
-			// Uniswap needs special complex builder deployment
-			txTypeForDeploy = types.TxTypeUniswapSwap
-		} else if ratios.ERC20Transfer > 0 || ratios.ERC20Approve > 0 ||
-			ratios.StorageWrite > 0 || ratios.HeavyCompute > 0 {
-			// Other contract types use standard deployment
-			txTypeForDeploy = types.TxTypeERC20Transfer
-		}
-	}
+	// Which contracts to deploy. Derived by workload.DeployTxTypeFor so this decision
+	// and the workers' tx-type selection read the SAME config — including the default
+	// config the workers fall back to when none was supplied.
+	txTypeForDeploy := workload.DeployTxTypeFor(req)
 
 	// Phase: Deploying contracts
 	if txTypeForDeploy != types.TxTypeEthTransfer {
@@ -480,7 +523,7 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	atomic.StoreUint64(&lg.preconfGaps, 0)
 
 	// Initialize realistic test metrics tracking
-	if req.Pattern == types.PatternRealistic {
+	if workload.UsesRealisticMix(req.Pattern) {
 		lg.metricsCol.InitRealisticMetrics()
 	}
 
@@ -655,11 +698,19 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 	dynamicAccounts := lg.accountMgr.GetDynamicAccounts()
 	allAccounts = append(allAccounts, dynamicAccounts...)
 
+	// Configure read load before any worker starts, so an unsuitable target (archive
+	// selection against a pruned node, a missing ERC-20 for eth_call) aborts the test
+	// here rather than producing a run whose reads measure nothing.
+	if err := lg.setupReadLoad(req); err != nil {
+		lg.setError(fmt.Sprintf("read load configuration failed: %v", err))
+		return
+	}
+
 	// Start sender workers
 	// More workers = better parallelism, but must not exceed semaphore capacity
 	numWorkers := len(allAccounts)
-	if numWorkers > 500 {
-		numWorkers = 500 // Cap workers (should be <= sender concurrency / 4)
+	if pool := senderWorkerPool(lg.cfg); numWorkers > pool {
+		numWorkers = pool // Cap workers (should be <= sender concurrency / 4)
 	}
 	if numWorkers > numAccounts {
 		numWorkers = numAccounts
@@ -669,6 +720,9 @@ func (lg *LoadGenerator) runInitialization(req types.StartTestRequest) {
 		lg.wg.Add(1)
 		go lg.senderWorker(i, allAccounts)
 	}
+
+	// Start read load alongside the senders, at its own independent rate
+	lg.startReadLoad()
 
 	// Start TPS calculator
 	lg.wg.Add(1)

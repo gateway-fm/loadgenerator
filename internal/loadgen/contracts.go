@@ -54,7 +54,11 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 
 	// Try to restore contracts from cache
 	if lg.cacheStorage != nil && !lg.contractsDeployed {
-		if lg.tryRestoreCachedContracts(ctx, cacheChainID, uniswapNeeded, uniswapBuilder) {
+		restored, err := lg.tryRestoreCachedContracts(ctx, cacheChainID, uniswapNeeded, uniswapBuilder)
+		if err != nil {
+			return err
+		}
+		if restored {
 			return nil
 		}
 	}
@@ -95,6 +99,24 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 		lg.logger.Info("Uniswap V3 contracts deployed and accounts setup")
 		lg.logger.Info("waiting for Uniswap transactions to settle...")
 		time.Sleep(5 * time.Second)
+
+		// Re-sync every account's nonce from the chain after Uniswap setup.
+		//
+		// SetupAccounts sends 4 TXs per account (mint USDC, wrap ETH, approve
+		// WETH, approve USDC) via setupAccountFireAndForget, which reads the
+		// nonce straight from the RPC into a LOCAL variable and increments that.
+		// It never advances the Account's own counter — the one ReserveNonce
+		// hands out during the load phase. So without this resync the load phase
+		// starts from the pre-setup nonce and the chain rejects EVERY
+		// transaction with "nonce too low: tx: 0 state: 4", giving txFailed ==
+		// txSent and a near-idle chain that looks like a throughput ceiling.
+		//
+		// Safe to do here: SetupAccounts already blocked on receipts for the
+		// last TX of every account, and nonce ordering means the earlier three
+		// are confirmed too, so the confirmed on-chain nonce is the true value.
+		if err := lg.accountMgr.InitializeNoncesFromChain(ctx, lg.l2Client, totalAccounts); err != nil {
+			return fmt.Errorf("failed to resync nonces after Uniswap setup: %w", err)
+		}
 
 		// Cache Uniswap contract addresses
 		lg.saveUniswapContractsToCache(ctx, cacheChainID, uniswapBuilder)
@@ -168,14 +190,14 @@ func (lg *LoadGenerator) ensureContractsDeployed(txType types.TransactionType) e
 
 // tryRestoreCachedContracts attempts to restore contracts from cache.
 // Returns true if all needed contracts were restored successfully.
-func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID int64, uniswapNeeded bool, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) bool {
+func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID int64, uniswapNeeded bool, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) (bool, error) {
 	cached, err := lg.cacheStorage.LoadCachedContracts(ctx, chainID)
 	if err != nil {
 		lg.logger.Warn("failed to load cached contracts", "error", err)
-		return false
+		return false, nil
 	}
 	if len(cached) == 0 {
-		return false
+		return false, nil
 	}
 
 	// Build name→address map for validation
@@ -192,7 +214,7 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 			slog.Int("invalid", len(invalid)),
 		)
 		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
-		return false
+		return false, nil
 	}
 
 	// Restore base contracts
@@ -202,7 +224,7 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 	if !hasERC20 || !hasGasConsumer || !hasNFT {
 		lg.logger.Info("base contracts not in cache, deploying fresh")
 		lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
-		return false
+		return false, nil
 	}
 
 	lg.erc20Contract = erc20Addr
@@ -246,7 +268,7 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 			lg.cacheStorage.DeleteCachedContracts(ctx, chainID)
 			// Reset base contract state so they get re-cached with uniswap
 			lg.contractsDeployed = false
-			return false
+			return false, nil
 		}
 
 		contracts := &uniswapv3.DeployedContracts{
@@ -265,19 +287,21 @@ func (lg *LoadGenerator) tryRestoreCachedContracts(ctx context.Context, chainID 
 		)
 
 		// Setup accounts that aren't yet uniswap-ready
-		lg.setupUniswapAccountsFromCache(ctx, chainID, uniswapBuilder)
+		if err := lg.setupUniswapAccountsFromCache(ctx, chainID, uniswapBuilder); err != nil {
+			return false, err
+		}
 	}
 
-	return true
+	return true, nil
 }
 
 // setupUniswapAccountsFromCache sets up only accounts that aren't marked as uniswap-ready.
-func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chainID int64, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) {
+func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chainID int64, uniswapBuilder *txbuilder.UniswapV3SwapBuilder) error {
 	// Load cached accounts to check uniswap_ready flag
 	cached, err := lg.cacheStorage.LoadCachedAccounts(ctx, chainID)
 	if err != nil {
 		lg.logger.Warn("failed to load cached accounts for uniswap check", "error", err)
-		return
+		return nil
 	}
 
 	readySet := make(map[string]bool, len(cached))
@@ -305,7 +329,7 @@ func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chai
 
 	if len(needSetup) == 0 {
 		lg.logger.Info("all accounts already uniswap-ready from cache")
-		return
+		return nil
 	}
 
 	lg.logger.Info("setting up non-ready accounts for Uniswap",
@@ -317,7 +341,20 @@ func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chai
 	gasPrice := big.NewInt(lg.cfg.GasPrice)
 	if err := uniswapBuilder.SetupAccounts(ctx, needSetup, lg.builderClient, bigChainID, gasPrice); err != nil {
 		lg.logger.Warn("failed to setup accounts for Uniswap", "error", err)
-		return
+		return nil
+	}
+
+	// Same stale-nonce hazard as the fresh-deploy path above: the 4 setup TXs per
+	// account bypass the Account nonce counter, so resync from chain before the
+	// load phase reserves any nonce. See the long comment at the other call site.
+	//
+	// FATAL, matching the fresh-deploy path. Warning and carrying on left those
+	// accounts with counters behind chain state and then marked them uniswap-ready,
+	// so the load phase started with stale nonces and could fail every submission —
+	// precisely the failure this resync was added to prevent (PR #62 review).
+	if err := lg.accountMgr.InitializeNoncesFromChain(ctx, lg.l2Client,
+		len(lg.accountMgr.GetAccounts())+len(dynamicAccounts)); err != nil {
+		return fmt.Errorf("resync nonces after incremental Uniswap setup: %w", err)
 	}
 
 	// Mark newly-setup accounts as uniswap-ready in cache
@@ -330,6 +367,7 @@ func (lg *LoadGenerator) setupUniswapAccountsFromCache(ctx context.Context, chai
 	if err := lg.cacheStorage.MarkAccountsUniswapReady(ctx, chainID, newAddresses); err != nil {
 		lg.logger.Warn("failed to mark accounts as uniswap-ready", "error", err)
 	}
+	return nil
 }
 
 func (lg *LoadGenerator) saveBaseContractsToCache(ctx context.Context, chainID int64) {

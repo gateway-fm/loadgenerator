@@ -217,7 +217,10 @@ func TestTryRestoreCachedContracts_CacheHit(t *testing.T) {
 	lg.cacheStorage = cache
 
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 
 	if !restored {
 		t.Fatal("expected tryRestoreCachedContracts to return true")
@@ -247,7 +250,10 @@ func TestTryRestoreCachedContracts_CacheMiss_EmptyCache(t *testing.T) {
 	lg.cacheStorage = cache
 
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 	if restored {
 		t.Fatal("expected false when cache is empty")
 	}
@@ -264,7 +270,10 @@ func TestTryRestoreCachedContracts_CacheMiss_LoadError(t *testing.T) {
 	lg.cacheStorage = cache
 
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 	if restored {
 		t.Fatal("expected false on load error")
 	}
@@ -295,7 +304,10 @@ func TestTryRestoreCachedContracts_InvalidContracts(t *testing.T) {
 	lg.cacheStorage = cache
 
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 	if restored {
 		t.Fatal("expected false when contracts are invalid on-chain")
 	}
@@ -332,7 +344,10 @@ func TestTryRestoreCachedContracts_MissingBaseContracts(t *testing.T) {
 	lg.cacheStorage = cache
 
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, false, nil)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 	if restored {
 		t.Fatal("expected false when GasConsumer missing from cache")
 	}
@@ -616,7 +631,10 @@ func TestTryRestoreCachedContracts_WithUniswap_FullRestore(t *testing.T) {
 
 	ub := txbuilder.NewUniswapV3SwapBuilder()
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 
 	if !restored {
 		t.Fatal("expected tryRestoreCachedContracts to return true")
@@ -671,7 +689,10 @@ func TestTryRestoreCachedContracts_WithUniswap_MissingUniswapContracts(t *testin
 
 	ub := txbuilder.NewUniswapV3SwapBuilder()
 	ctx := context.Background()
-	restored := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+	restored, restoreErr := lg.tryRestoreCachedContracts(ctx, 42069, true, ub)
+	if restoreErr != nil {
+		t.Fatalf("tryRestoreCachedContracts: %v", restoreErr)
+	}
 
 	if restored {
 		t.Fatal("expected false when uniswap contracts missing from cache")
@@ -696,7 +717,9 @@ func TestSetupUniswapAccountsFromCache_LoadError(t *testing.T) {
 
 	ub := txbuilder.NewUniswapV3SwapBuilder()
 	// Should not panic, returns early on error
-	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+	if err := lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub); err != nil {
+		t.Fatalf("setupUniswapAccountsFromCache: %v", err)
+	}
 }
 
 func TestSetupUniswapAccountsFromCache_AllAccountsReady(t *testing.T) {
@@ -716,7 +739,9 @@ func TestSetupUniswapAccountsFromCache_AllAccountsReady(t *testing.T) {
 
 	ub := txbuilder.NewUniswapV3SwapBuilder()
 	// All accounts already ready, should return early without calling SetupAccounts
-	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+	if err := lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub); err != nil {
+		t.Fatalf("setupUniswapAccountsFromCache: %v", err)
+	}
 }
 
 func TestSetupUniswapAccountsFromCache_SetupError(t *testing.T) {
@@ -735,7 +760,9 @@ func TestSetupUniswapAccountsFromCache_SetupError(t *testing.T) {
 	// Fresh builder with deployed=false will return "contracts not deployed" error
 	ub := txbuilder.NewUniswapV3SwapBuilder()
 	// Should not panic, error is logged as warning
-	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+	if err := lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub); err != nil {
+		t.Fatalf("setupUniswapAccountsFromCache: %v", err)
+	}
 }
 
 func TestSetupUniswapAccountsFromCache_PartialReady(t *testing.T) {
@@ -761,7 +788,9 @@ func TestSetupUniswapAccountsFromCache_PartialReady(t *testing.T) {
 	// handled gracefully. This tests the filtering logic: only acc2 should
 	// be in needSetup.
 	ub := txbuilder.NewUniswapV3SwapBuilder()
-	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+	if err := lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub); err != nil {
+		t.Fatalf("setupUniswapAccountsFromCache: %v", err)
+	}
 }
 
 func TestSetupUniswapAccountsFromCache_DynamicAccountsIncluded(t *testing.T) {
@@ -786,7 +815,9 @@ func TestSetupUniswapAccountsFromCache_DynamicAccountsIncluded(t *testing.T) {
 
 	// Will fail on SetupAccounts (deployed=false) but exercises the dynamic account path
 	ub := txbuilder.NewUniswapV3SwapBuilder()
-	lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub)
+	if err := lg.setupUniswapAccountsFromCache(context.Background(), 42069, ub); err != nil {
+		t.Fatalf("setupUniswapAccountsFromCache: %v", err)
+	}
 }
 
 func TestEnsureContractsDeployed_SetsBuilderContractAddresses(t *testing.T) {

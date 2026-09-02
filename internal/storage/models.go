@@ -29,7 +29,7 @@ type TestRun struct {
 	ErrorMessage     string                  `json:"errorMessage,omitempty"`
 	TxLoggingEnabled bool                    `json:"txLoggingEnabled"`
 	ExecutionLayer   string                  `json:"executionLayer"` // "reth" or "cdk-erigon"
-	PrivacyMode      bool                    `json:"privacyMode"`   // Whether test used privacy proxy
+	PrivacyMode      bool                    `json:"privacyMode"`    // Whether test used privacy proxy
 	// Block metrics (aggregated from time series)
 	BlockCount     int     `json:"blockCount,omitempty"`     // Total blocks produced during test
 	TotalGasUsed   uint64  `json:"totalGasUsed,omitempty"`   // Total gas used across all blocks
@@ -53,6 +53,10 @@ type TestRun struct {
 	PendingLatency *types.LatencyStats        `json:"pendingLatency,omitempty"`
 	AccountsActive int                        `json:"accountsActive,omitempty"`
 	AccountsFunded int                        `json:"accountsFunded,omitempty"`
+	// Read-query load results, including the per-method breakdown. Persisted because
+	// comparing read behaviour ACROSS runs is the point of measuring it — a live
+	// /v1/status poll only exists while the run does.
+	ReadLoad *types.ReadLoadMetrics `json:"readLoad,omitempty"`
 	// Environment snapshot (config captured at test start)
 	Environment *EnvironmentSnapshot `json:"environment,omitempty"`
 	// Verification results (analysis after test completion)
