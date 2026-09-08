@@ -544,6 +544,8 @@ func (cb *CircuitBreaker) onOpen() {
 | `LISTEN_ADDR` | :3001 | API listen address |
 | `DATABASE_PATH` | /data/loadgen.db | SQLite database |
 | `BLOCK_TIME_MS` | 250 | Block interval in milliseconds |
+| `ERC20_RECIPIENT_POOL` | (unset) | Bounds the `erc20-transfer` recipient set to N addresses derived as `sha256(seed \|\| be64(i))[:20]`. Unset or `0` keeps the historical behaviour: a fresh random recipient per transfer, so holders grow 1:1 with transfers — 10M transfers makes ~10M holders and every downstream indexer balance write is an INSERT. Setting N makes the holder:transfer ratio a knob (10M transfers over `1000000` is ~10 transfers per holder), which is the shape an indexer actually sees. **Pooled recipients repeat, so they pay a warm SSTORE (~30k gas) instead of a cold one (~52k): transfers get cheaper and achievable tx/s rises. That is a changed workload, not a speedup — gas and throughput from a pooled run are not comparable with an all-random one.** Addresses are derived, never stored, so a 1M pool costs no memory. |
+| `ERC20_RECIPIENT_POOL_SEED` | `gasstorm-erc20-recipient-pool-v1` | Seed the recipient pool is derived from. Fixed by default so `(seed, N)` alone reproduces the same holder set, making a run definition replayable. |
 
 ## Gas Profiles
 
