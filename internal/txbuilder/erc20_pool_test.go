@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -235,6 +236,28 @@ func indexOf(t *testing.T, b *ERC20TransferBuilder, addr common.Address) uint64 
 	}
 	t.Fatalf("recipient %s is outside the pool of %d", addr.Hex(), b.poolSize)
 	return 0
+}
+
+// The ChainID guard predates the pool config and must keep running first, so an
+// input that already reached it still gets the same error.
+func TestERC20RecipientPool_ChainIDGuardPrecedesConfigError(t *testing.T) {
+	t.Setenv(EnvERC20RecipientPool, "1_000_000")
+
+	b := NewERC20TransferBuilder(common.Address{})
+	if b.configErr == nil {
+		t.Fatal("configErr = nil, want the parse error")
+	}
+
+	for _, chainID := range []*big.Int{nil, big.NewInt(0)} {
+		_, err := b.Build(TxParams{ChainID: chainID, Nonce: 0})
+		if err == nil {
+			t.Fatalf("ChainID %v: Build succeeded", chainID)
+		}
+		if !strings.Contains(err.Error(), "ChainID must be non-nil and non-zero") {
+			t.Errorf("ChainID %v: got %q, want the ChainID error before the config error",
+				chainID, err)
+		}
+	}
 }
 
 // A malformed value must not be able to reach a transaction at all.

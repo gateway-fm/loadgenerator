@@ -216,11 +216,11 @@ func (b *ERC20TransferBuilder) GasLimit() uint64 {
 
 // Build creates an ERC20 transfer transaction.
 func (b *ERC20TransferBuilder) Build(params TxParams) (*types.Transaction, error) {
-	if b.configErr != nil {
-		return nil, b.configErr
-	}
 	if params.ChainID == nil || params.ChainID.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("ChainID must be non-nil and non-zero")
+	}
+	if b.configErr != nil {
+		return nil, b.configErr
 	}
 	recipient, err := b.recipient()
 	if err != nil {
