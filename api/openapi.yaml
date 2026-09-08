@@ -1044,6 +1044,16 @@ components:
           type: number
         loadGenExecutionLayer:
           type: string
+        loadGenErc20RecipientPool:
+          type: integer
+          format: int64
+          description: >-
+            ERC-20 recipient pool size. 0 means unbounded random recipients, so
+            holders grow one per transfer. Decides the cold/warm SSTORE mix, so
+            runs differing only here are not gas- or throughput-comparable.
+        loadGenErc20RecipientPoolSeed:
+          type: string
+          description: Seed the recipient pool addresses are derived from.
 
     VerificationResult:
       type: object

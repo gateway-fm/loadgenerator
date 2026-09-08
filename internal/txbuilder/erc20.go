@@ -1,9 +1,14 @@
 package txbuilder
 
 import (
-	"crypto/rand"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math/big"
+	mrand "math/rand/v2"
+	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -87,17 +92,114 @@ func encodeERC20Approve(spender common.Address, amount *big.Int) []byte {
 	return data
 }
 
+const (
+	EnvERC20RecipientPool     = "ERC20_RECIPIENT_POOL"
+	EnvERC20RecipientPoolSeed = "ERC20_RECIPIENT_POOL_SEED"
+
+	defaultERC20RecipientPoolSeed = "gasstorm-erc20-recipient-pool-v1"
+)
+
 // ERC20TransferBuilder builds ERC20 transfer transactions.
-// Each transfer goes to a random recipient address to simulate realistic
-// cold SSTORE gas costs (~52k gas instead of ~30k for warm).
+//
+// Recipients are fresh random addresses unless ERC20_RECIPIENT_POOL=N bounds
+// them to N derived addresses. Pooled recipients repeat, so they pay a warm
+// SSTORE (~30k gas) rather than a cold one (~52k): gas and tx/s from a pooled
+// run are not comparable with an all-random one.
 type ERC20TransferBuilder struct {
 	contractAddress common.Address
+
+	// poolSize is 0 for fully random recipients, else the pool cardinality.
+	poolSize uint64
+	poolSeed []byte
+
+	// configErr is a malformed ERC20_RECIPIENT_POOL, reported from Build so a
+	// bad value cannot present as the unbounded-random workload.
+	configErr error
 }
 
 // NewERC20TransferBuilder creates a new ERC20 transfer builder.
-// The recipient parameter is ignored - random recipients are used for realistic gas.
+// The recipient parameter is ignored - see ERC20TransferBuilder.
 func NewERC20TransferBuilder(_ common.Address) *ERC20TransferBuilder {
-	return &ERC20TransferBuilder{}
+	poolSize, seed, err := ERC20RecipientPoolFromEnv()
+	b := newERC20TransferBuilderWithPool(poolSize, seed)
+	b.configErr = err
+	return b
+}
+
+func newERC20TransferBuilderWithPool(poolSize uint64, seed string) *ERC20TransferBuilder {
+	return &ERC20TransferBuilder{
+		poolSize: poolSize,
+		poolSeed: []byte(seed),
+	}
+}
+
+// ParseERC20RecipientPool validates ERC20_RECIPIENT_POOL.
+//
+// Unparseable and non-positive values are ERRORS rather than silently falling
+// back to 0, because 0 is not a default here - it selects the unbounded-random
+// workload. ERC20_RECIPIENT_POOL=1_000_000 would otherwise start cleanly, grow
+// one holder per transfer, and report all-random gas and tx/s under a "1M pool"
+// label. Failing at startup is cheaper than diagnosing that from a load-test
+// result.
+func ParseERC20RecipientPool(v string) (uint64, error) {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", EnvERC20RecipientPool, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be positive", EnvERC20RecipientPool, v)
+	}
+	return uint64(n), nil
+}
+
+// ERC20RecipientPoolFromEnv reads both recipient-pool variables. An unset pool
+// yields 0 with no error; a set but malformed one yields the error.
+func ERC20RecipientPoolFromEnv() (uint64, string, error) {
+	seed := defaultERC20RecipientPoolSeed
+	if v := os.Getenv(EnvERC20RecipientPoolSeed); v != "" {
+		seed = v
+	}
+
+	v := os.Getenv(EnvERC20RecipientPool)
+	if v == "" {
+		return 0, seed, nil
+	}
+
+	poolSize, err := ParseERC20RecipientPool(v)
+	if err != nil {
+		return 0, seed, err
+	}
+	return poolSize, seed, nil
+}
+
+// poolAddress derives addr(i) = sha256(seed || big-endian uint64(i))[:20], so
+// a pool of any size costs no memory and is reproducible from (seed, N).
+func (b *ERC20TransferBuilder) poolAddress(i uint64) common.Address {
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], i)
+
+	h := sha256.New()
+	h.Write(b.poolSeed)
+	h.Write(idx[:])
+	sum := h.Sum(nil)
+
+	var addr common.Address
+	copy(addr[:], sum[:common.AddressLength])
+	return addr
+}
+
+// recipient returns the recipient for one transfer. math/rand/v2's top-level
+// generator is goroutine-safe and lock-free per-thread; Build is called
+// concurrently by the senders.
+func (b *ERC20TransferBuilder) recipient() (common.Address, error) {
+	if b.poolSize == 0 {
+		var addr common.Address
+		if _, err := crand.Read(addr[:]); err != nil {
+			return common.Address{}, fmt.Errorf("generate random recipient: %w", err)
+		}
+		return addr, nil
+	}
+	return b.poolAddress(mrand.Uint64N(b.poolSize)), nil
 }
 
 // Type returns the transaction type identifier.
@@ -106,20 +208,24 @@ func (b *ERC20TransferBuilder) Type() ptypes.TransactionType {
 }
 
 // GasLimit returns the gas limit for ERC20 transfer.
-// Uses 70k for cold SSTORE (random recipient with zero balance ~52k + safe buffer).
+// Uses 70k for cold SSTORE (random recipient with zero balance ~52k + safe
+// buffer), which bounds the cheaper pooled case too.
 func (b *ERC20TransferBuilder) GasLimit() uint64 {
 	return 70000
 }
 
 // Build creates an ERC20 transfer transaction.
-// Each call generates a random recipient to ensure cold SSTORE gas costs.
 func (b *ERC20TransferBuilder) Build(params TxParams) (*types.Transaction, error) {
 	if params.ChainID == nil || params.ChainID.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("ChainID must be non-nil and non-zero")
 	}
-	// Generate random recipient for realistic cold SSTORE costs
-	var recipient common.Address
-	rand.Read(recipient[:])
+	if b.configErr != nil {
+		return nil, b.configErr
+	}
+	recipient, err := b.recipient()
+	if err != nil {
+		return nil, err
+	}
 
 	data := encodeERC20Transfer(recipient, big.NewInt(1))
 

@@ -123,6 +123,11 @@ type EnvironmentSnapshot struct {
 	LoadGenGasTipCapGwei  float64 `json:"loadGenGasTipCapGwei"`
 	LoadGenGasFeeCapGwei  float64 `json:"loadGenGasFeeCapGwei"`
 	LoadGenExecutionLayer string  `json:"loadGenExecutionLayer"`
+	// ERC20 recipient pool: 0 means unbounded random recipients. Recorded because
+	// it decides the cold/warm SSTORE mix, so two runs differing only here are not
+	// gas- or throughput-comparable.
+	LoadGenERC20RecipientPool     uint64 `json:"loadGenErc20RecipientPool"`
+	LoadGenERC20RecipientPoolSeed string `json:"loadGenErc20RecipientPoolSeed,omitempty"`
 
 	// Node identification (for test reproducibility and comparison)
 	NodeName        string `json:"nodeName"`        // "op-reth", "gravity-reth", "cdk-erigon"
