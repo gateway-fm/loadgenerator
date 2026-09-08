@@ -111,12 +111,19 @@ type ERC20TransferBuilder struct {
 	// poolSize is 0 for fully random recipients, else the pool cardinality.
 	poolSize uint64
 	poolSeed []byte
+
+	// configErr is a malformed ERC20_RECIPIENT_POOL, reported from Build so a
+	// bad value cannot present as the unbounded-random workload.
+	configErr error
 }
 
 // NewERC20TransferBuilder creates a new ERC20 transfer builder.
 // The recipient parameter is ignored - see ERC20TransferBuilder.
 func NewERC20TransferBuilder(_ common.Address) *ERC20TransferBuilder {
-	return newERC20TransferBuilderWithPool(erc20PoolSizeFromEnv(), erc20PoolSeedFromEnv())
+	poolSize, seed, err := ERC20RecipientPoolFromEnv()
+	b := newERC20TransferBuilderWithPool(poolSize, seed)
+	b.configErr = err
+	return b
 }
 
 func newERC20TransferBuilderWithPool(poolSize uint64, seed string) *ERC20TransferBuilder {
@@ -126,20 +133,43 @@ func newERC20TransferBuilderWithPool(poolSize uint64, seed string) *ERC20Transfe
 	}
 }
 
-func erc20PoolSizeFromEnv() uint64 {
-	if v := os.Getenv(EnvERC20RecipientPool); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return uint64(n)
-		}
+// ParseERC20RecipientPool validates ERC20_RECIPIENT_POOL.
+//
+// Unparseable and non-positive values are ERRORS rather than silently falling
+// back to 0, because 0 is not a default here - it selects the unbounded-random
+// workload. ERC20_RECIPIENT_POOL=1_000_000 would otherwise start cleanly, grow
+// one holder per transfer, and report all-random gas and tx/s under a "1M pool"
+// label. Failing at startup is cheaper than diagnosing that from a load-test
+// result.
+func ParseERC20RecipientPool(v string) (uint64, error) {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", EnvERC20RecipientPool, v, err)
 	}
-	return 0
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be positive", EnvERC20RecipientPool, v)
+	}
+	return uint64(n), nil
 }
 
-func erc20PoolSeedFromEnv() string {
+// ERC20RecipientPoolFromEnv reads both recipient-pool variables. An unset pool
+// yields 0 with no error; a set but malformed one yields the error.
+func ERC20RecipientPoolFromEnv() (uint64, string, error) {
+	seed := defaultERC20RecipientPoolSeed
 	if v := os.Getenv(EnvERC20RecipientPoolSeed); v != "" {
-		return v
+		seed = v
 	}
-	return defaultERC20RecipientPoolSeed
+
+	v := os.Getenv(EnvERC20RecipientPool)
+	if v == "" {
+		return 0, seed, nil
+	}
+
+	poolSize, err := ParseERC20RecipientPool(v)
+	if err != nil {
+		return 0, seed, err
+	}
+	return poolSize, seed, nil
 }
 
 // poolAddress derives addr(i) = sha256(seed || big-endian uint64(i))[:20], so
@@ -186,6 +216,9 @@ func (b *ERC20TransferBuilder) GasLimit() uint64 {
 
 // Build creates an ERC20 transfer transaction.
 func (b *ERC20TransferBuilder) Build(params TxParams) (*types.Transaction, error) {
+	if b.configErr != nil {
+		return nil, b.configErr
+	}
 	if params.ChainID == nil || params.ChainID.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("ChainID must be non-nil and non-zero")
 	}
