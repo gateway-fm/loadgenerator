@@ -102,9 +102,12 @@ const (
 // ERC20TransferBuilder builds ERC20 transfer transactions.
 //
 // Recipients are fresh random addresses unless ERC20_RECIPIENT_POOL=N bounds
-// them to N derived addresses. Pooled recipients repeat, so they pay a warm
-// SSTORE (~30k gas) rather than a cold one (~52k): gas and tx/s from a pooled
-// run are not comparable with an all-random one.
+// them to N derived addresses. A repeat recipient's balance slot is already
+// nonzero, so its SSTORE is nonzero->nonzero (2,900) instead of zero->nonzero
+// (20,000): ~34.6k gas per transfer instead of ~51.7k. This is not EIP-2929
+// warmth - access lists reset per transaction, so every transfer still pays the
+// 2,100 cold-slot charge. Gas and tx/s from a pooled run are not comparable
+// with an all-random one.
 type ERC20TransferBuilder struct {
 	contractAddress common.Address
 
@@ -208,8 +211,9 @@ func (b *ERC20TransferBuilder) Type() ptypes.TransactionType {
 }
 
 // GasLimit returns the gas limit for ERC20 transfer.
-// Uses 70k for cold SSTORE (random recipient with zero balance ~52k + safe
-// buffer), which bounds the cheaper pooled case too.
+// Sized for the costliest case: a sender's first transfer, where both the
+// sender and recipient balance slots go zero->nonzero (~68.8k measured), so it
+// also bounds a new recipient (~51.7k) and a repeat one (~34.6k).
 func (b *ERC20TransferBuilder) GasLimit() uint64 {
 	return 70000
 }
