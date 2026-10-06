@@ -15,6 +15,7 @@ import (
 	"github.com/gateway-fm/loadgenerator/internal/loadgen"
 	"github.com/gateway-fm/loadgenerator/internal/storage"
 	"github.com/gateway-fm/loadgenerator/internal/transport"
+	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
 	"github.com/gateway-fm/loadgenerator/pkg/types"
 )
 
@@ -51,6 +52,20 @@ func batchAckTimeoutFromEnv(logger *slog.Logger) time.Duration {
 		os.Exit(1)
 	}
 	return d
+}
+
+// erc20RecipientPoolFromEnv reads ERC20_RECIPIENT_POOL through the SAME validator
+// the builder uses, and exits on an invalid value.
+//
+// 0 is not a default for this variable - it selects the unbounded-random recipient
+// workload, where holders grow one per transfer. A typo such as the Go-literal
+// form 1_000_000 would start cleanly and report all-random gas and tx/s under a
+// "1M pool" label, and the only symptom is figures matching the old baseline.
+func erc20RecipientPoolFromEnv(logger *slog.Logger) {
+	if _, _, err := txbuilder.ERC20RecipientPoolFromEnv(); err != nil {
+		logger.Error("invalid ERC20_RECIPIENT_POOL", "error", err)
+		os.Exit(1)
+	}
 }
 
 // envPositiveInt parses a positive int from env, returning 0 (meaning "keep the
@@ -102,6 +117,8 @@ func main() {
 		level = slog.LevelInfo
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+
+	erc20RecipientPoolFromEnv(logger)
 
 	go func() {
 		logger.Info("pprof listening", "addr", "localhost:6061")

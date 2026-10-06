@@ -12,6 +12,9 @@ services:
       - DATABASE_PATH=/data/loadgen.db
       - EXECUTION_LAYER=${EXECUTION_LAYER:-reth}
       - BLOCK_TIME_MS=${BLOCK_TIME_MS:-150}
+      # Empty means unset: the loader treats "" as the historical all-random workload.
+      - ERC20_RECIPIENT_POOL=${ERC20_RECIPIENT_POOL:-}
+      - ERC20_RECIPIENT_POOL_SEED=${ERC20_RECIPIENT_POOL_SEED:-}
     volumes:
       - loadgen-data:/data
     healthcheck:

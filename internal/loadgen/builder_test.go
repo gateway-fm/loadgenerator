@@ -422,6 +422,58 @@ func TestFetchBuilderConfig(t *testing.T) {
 			t.Errorf("LoadGenGasFeeCapGwei = %f, want 5.0", env.LoadGenGasFeeCapGwei)
 		}
 	})
+
+	t.Run("erc20 recipient pool in snapshot", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				w.Write([]byte(`{}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		// Literal names, not the txbuilder constants, so a rename of the
+		// variables operators actually set fails here too.
+		t.Setenv("ERC20_RECIPIENT_POOL", "1000000")
+		t.Setenv("ERC20_RECIPIENT_POOL_SEED", "snapshot-test-seed")
+
+		lg := newTestLoadGenerator(t)
+		lg.cfg.BuilderRPCURL = srv.URL
+
+		env := lg.fetchBuilderConfig()
+		if env.LoadGenERC20RecipientPool != 1000000 {
+			t.Errorf("LoadGenERC20RecipientPool = %d, want 1000000", env.LoadGenERC20RecipientPool)
+		}
+		if env.LoadGenERC20RecipientPoolSeed != "snapshot-test-seed" {
+			t.Errorf("LoadGenERC20RecipientPoolSeed = %q, want snapshot-test-seed", env.LoadGenERC20RecipientPoolSeed)
+		}
+	})
+
+	t.Run("erc20 recipient pool unset in snapshot", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				w.Write([]byte(`{}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		t.Setenv("ERC20_RECIPIENT_POOL", "")
+		t.Setenv("ERC20_RECIPIENT_POOL_SEED", "")
+
+		lg := newTestLoadGenerator(t)
+		lg.cfg.BuilderRPCURL = srv.URL
+
+		env := lg.fetchBuilderConfig()
+		if env.LoadGenERC20RecipientPool != 0 {
+			t.Errorf("LoadGenERC20RecipientPool = %d, want 0 (random mode)", env.LoadGenERC20RecipientPool)
+		}
+		if env.LoadGenERC20RecipientPoolSeed != "gasstorm-erc20-recipient-pool-v1" {
+			t.Errorf("LoadGenERC20RecipientPoolSeed = %q, want the default seed", env.LoadGenERC20RecipientPoolSeed)
+		}
+	})
 }
 
 func TestFetchHeaderAttestations(t *testing.T) {

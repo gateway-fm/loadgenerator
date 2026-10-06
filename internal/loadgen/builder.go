@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gateway-fm/loadgenerator/internal/storage"
+	"github.com/gateway-fm/loadgenerator/internal/txbuilder"
 )
 
 func (lg *LoadGenerator) resyncAllNonces() {
@@ -238,10 +239,15 @@ func (lg *LoadGenerator) fetchBuilderConfig() *storage.EnvironmentSnapshot {
 	defer cancel()
 
 	// Initialize environment snapshot with load-gen config
+	erc20PoolSize, erc20PoolSeed, _ := txbuilder.ERC20RecipientPoolFromEnv()
+
 	env := &storage.EnvironmentSnapshot{
 		LoadGenGasTipCapGwei:  float64(lg.cfg.GasTipCap) / 1e9, // wei to gwei
 		LoadGenGasFeeCapGwei:  float64(lg.cfg.GasFeeCap) / 1e9, // wei to gwei
 		LoadGenExecutionLayer: lg.cfg.ExecutionLayer,
+
+		LoadGenERC20RecipientPool:     erc20PoolSize,
+		LoadGenERC20RecipientPoolSeed: erc20PoolSeed,
 		// Node identification - set defaults based on execution layer
 		NodeName:        lg.cfg.Capabilities.Name,
 		UseBlockBuilder: lg.cfg.Capabilities.HasExternalBlockBuilder,
