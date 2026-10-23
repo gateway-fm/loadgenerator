@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go clean -cache && go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
 
 # Runtime stage
-FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
 
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates curl
 
