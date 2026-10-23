@@ -18,9 +18,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy source
 COPY . .
 
-# Build with cache mounts for Go modules (go-build cache cleared to ensure source changes are picked up)
+# Build with cache mounts for Go modules (go-build cache cleared to ensure source changes are picked up).
+# The go-build cache is keyed per target arch: with a shared mount, one platform's
+# `go clean -cache` deletes entries the other platform is reading mid-build.
+ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETARCH} \
     go clean -cache && go mod tidy && go build -ldflags="-s -w" -o load-generator ./cmd/loadgen
 
 # Runtime stage
